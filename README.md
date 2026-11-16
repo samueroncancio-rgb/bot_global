@@ -2,8 +2,8 @@
 
 Sistema de alta disponibilidad, baja latencia y reproducibilidad matemática para trading cuantitativo basado en microestructura de mercado y flujo de órdenes (*order flow*) en cripto-derivados.
 
-El proyecto abarca el ciclo completo de vida del trading algorítmico: desde la **ingesta en tiempo real de 4 exchanges** (**Binance USDⓈ-M Futures**, **OKX**, **Bybit**, **Hyperliquid**), normalización de eventos y persistencia en un **Lakehouse local/S3** (Bronze, Silver, Gold), hasta un **motor de features unificado** (Delta Global ponderado, OBI multiescala, CVD, liquidaciones), control pre-trade ineludible con **RiskGuard**, **Kill-Switch defensivo de 5 capas**, y ejecución institucional en **Binance USDⓈ-M Futures** con soporte de Algo Orders y reconciliación periódica.
-
+El proyecto abarca el ciclo completo de vida del trading algorítmico: desde la **ingesta en tiempo real de 4 exchanges** (**Binance USDⓈ-M Futures**, **OKX**, **Bybit**, **Hyperliquid**), normalización de eventos y persistencia en un **Lakehouse local/S3** (Bronze, Silver, Gold), hasta un **motor de features unificado** (Delta Global ponderado, OBI multiescala, CVD, liqders y reconciliación periódica.
+uidaciones), control pre-trade ineludible con **RiskGuard**, **Kill-Switch defensivo de 5 capas**, y ejecución institucional en **Binance USDⓈ-M Futures** con soporte de Algo Or
 ---
 
 ## Tabla de Contenidos
@@ -16,6 +16,8 @@ El proyecto abarca el ciclo completo de vida del trading algorítmico: desde la 
 7. [Cómo Realizar las Pruebas (Tests y Calidad)](#7-cómo-realizar-las-pruebas-tests-y-calidad)
 8. [Documentación Clave del Proyecto](#8-documentación-clave-del-proyecto)
 9. [Estructura del Repositorio](#9-estructura-del-repositorio)
+10. [Estrategia Explicada de Forma Sencilla: ¿Cómo Decide el Bot?](#10-estrategia-explicada-de-forma-sencilla-cómo-decide-el-bot)
+11. [¿Para qué sirve el Módulo LLM si todo está en Código?](#11-para-qué-sirve-el-módulo-llm-si-todo-está-en-código)
 
 ---
 
@@ -446,3 +448,88 @@ orderflow-bot/
     ├── integration/                 # Tests de integración End-to-End
     └── unit/                        # Tests unitarios por módulo
 ```
+## 10. Estrategia Explicada de Forma Sencilla: ¿Cómo Decide el Bot?
+
+Para entender cómo decide el bot, imagina que estás en una subasta de arte que ocurre en **4 salas diferentes al mismo tiempo** (Binance, OKX, Bybit e Hyperliquid):
+
+El bot **no intenta adivinar el futuro** con dibujos en el gráfico ni indicadores lentos (como medias móviles o RSI). En su lugar, mide **dos fuerzas físicas inmediatas del mercado**:
+
+### 1. Las dos preguntas que se hace el bot cada segundo
+
+#### Pregunta A: ¿Quién está atacando con fuerza? (El *Delta Global*)
+En cada transacción hay alguien que entra con prisa comprando a lo que cueste (*agresor comprador*) o alguien que vende asustado (*agresor vendedor*):
+- Si en los últimos 5 minutos entran \$50 millones en compras agresivas y solo \$10 millones en ventas, hay un saldo neto a favor de los compradores (**Delta positivo**).
+- El bot no mira solo Binance: suma lo que pasa en los 4 exchanges a la vez (dándole más peso a Binance por su volumen, pero escuchando también a OKX, Bybit e Hyperliquid).
+- Cuando esa fuerza compradora es **anormalmente alta** (estadísticamente superior al 95% de los momentos normales, $Z \ge 1.8$), el bot concluye: *"Hay compradores institucionales empujando con fuerza en todas partes"*.
+
+#### Pregunta B: ¿El camino está libre o hay un muro en contra? (El *OBI* o Desequilibrio del Libro)
+El bot mira el libro de órdenes (la lista de personas que esperan para comprar o vender en los próximos 10 niveles de precio):
+- Si hay muchas más órdenes de compra esperando abajo que órdenes de venta frenando arriba (**OBI positivo $> +0.20$**), significa que **hay un suelo firme debajo y poco freno arriba**.
+- El camino de menor resistencia es hacia arriba.
+
+---
+
+### 2. Las Reglas de Decisión
+
+El bot solo opera cuando **ambas fuerzas coinciden** (principio de confluencia):
+
+#### ¿Cuándo COMPRA? (Entrada en LONG)
+El bot compra si se cumplen **todas** estas condiciones a la vez:
+1. **Fuerza compradora**: El Delta Global multi-exchange es inusualmente alto ($Z \ge 1.8$).
+2. **Camino despejado**: El libro de órdenes tiene mucho más soporte abajo que resistencia arriba ($\text{OBI} \ge +0.20$).
+3. **No tiene otra posición abierta**: Nunca sobre-opera ni acumula riesgo innecesario.
+4. **RiskGuard da luz verde**: La latencia de internet es baja y los datos llegan frescos.
+
+> **Cómo entra**: Envía una orden límite al mejor precio disponible con bandera `GTX` (*Maker post-only*) para **cobrar comisiones en lugar de pagarlas**.
+
+#### ¿Cuándo VENDE? (Entrada en SHORT)
+El bot vende en corto si ocurre exactamente lo contrario:
+1. **Fuerza vendedora**: El Delta Global es fuertemente negativo ($Z \le -1.8$, ventas masivas en los exchanges).
+2. **Pared arriba y vacío abajo**: El libro de órdenes está cargado de vendedores esperando arriba y pocos compradores abajo ($\text{OBI} \le -0.20$).
+3. **No tiene posición previa**.
+
+---
+
+### 3. ¿Cuándo y cómo CIERRA la operación?
+
+Ninguna orden se envía al mercado sin su plan de salida **ya calculado desde el primer milisegundo**:
+
+```
+          [ +1.6% ] ---> TAKE PROFIT (Cierre con ganancias automático)
+             ^
+             |
+[ PRECIO DE ENTRADA ] (Ej: $50,000)
+             |
+             v
+          [ -0.8% ] ---> STOP LOSS (Cierre de protección innegociable)
+```
+
+1. **Si el trade va bien**: Cuando el precio sube un **+1.6%**, se ejecuta la orden de **Take-Profit** y se asegura la ganancia.
+2. **Si el mercado se da la vuelta**: Si el precio cae un **-0.8%**, salta el **Stop-Loss** en Binance para cortar la pérdida de raíz *(relación beneficio/riesgo 2 a 1)*.
+3. **El cinturón de seguridad (Regla de los 1.5 segundos)**:
+   Si por alguna falla de internet o del exchange la orden de Stop-Loss no queda registrada en Binance en menos de **1.5 segundos** tras haber comprado, el bot **vende todo inmediatamente a precio de mercado** para no quedarse jamás desprotegido.
+
+En resumen: **el bot solo entra cuando los grandes jugadores están empujando en todos los exchanges a la vez y el libro de órdenes no tiene frenos, saliendo automáticamente si gana el +1.6% o cortando si pierde el 0.8%**.
+
+---
+
+## 11. ¿Para qué sirve el Módulo LLM si todo está en Código?
+
+Una pregunta clave en trading cuantitativo: **¿Por qué hay un LLM en este repositorio si las decisiones de compra y venta ya están programadas en Python?**
+
+### Lo que el LLM NUNCA hace:
+- **NO toma decisiones de compra ni venta en tiempo real**: Un LLM tarda entre 500 ms y 2 segundos en responder, mientras que el mercado se mueve en milisegundos. Además, un LLM es probabilístico (puede equivocarse o alucinar), lo cual es inaceptable para ejecutar órdenes directas con dinero real.
+- **NO está en el bucle crítico de trading**: Si la API de Gemini u OpenAI se cae, el bot **sigue operando con total normalidad** porque la estrategia y RiskGuard son 100% código matemático y determinista.
+
+### Lo que el LLM SÍ hace (Auditoría Offline y Post-Sesión):
+El LLM actúa como un **Oficial de Riesgos y Analista Cuantitativo Senior** una vez que la sesión de trading o el backtest ha terminado (*fuera de la ruta crítica*):
+
+1. **Auditoría Narrativa de la Sesión**:
+   Lee los registros numéricos brutos (PnL neto, cantidad de trades, ratio de acierto, drawdown máximo, latencia RTT observada) y redacta un informe ejecutivo estructurado en Markdown para que el operador humano no tenga que revisar miles de líneas de logs.
+2. **Diagnóstico Forense de Disparos del Kill-Switch**:
+   Si durante el día se activó alguna capa del Kill-Switch (por ejemplo, desconexión de OKX o spike de latencia en Binance durante una noticia macroeconómica), el LLM analiza los eventos y explica la causa raíz en lenguaje claro.
+3. **Recomendaciones de Calibración de Riesgo**:
+   Compara la volatilidad real del día contra los umbrales configurados y sugiere ajustes prácticos (por ejemplo: *"El Stop-Loss del 0.8% estuvo muy ceñido para la volatilidad observada del 1.4%; considera ampliar a 1.0% o subir el umbral Z-score a 2.0 para filtrar ruido"*).
+
+> [!NOTE]
+> **Totalmente Opcional**: Si no configuras ninguna clave de Gemini (`GEMINI_API_KEY`) ni de OpenAI (`LLM_API_KEY`), el módulo LLM permanece inactivo y el bot opera al 100% de sus capacidades matemáticas y de ejecución.
