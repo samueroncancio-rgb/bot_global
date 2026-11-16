@@ -217,6 +217,16 @@ class PaperExecutionEngine:
             "avgPrice": str(paper_order.avg_price),
         }
 
+    def fill_order(self, client_order_id: str, fill_price: float | None = None) -> None:
+        """Simula la ejecución completa de una orden en el paper engine."""
+        order = self._orders.get(client_order_id)
+        if order and order.status in ("NEW", "PARTIALLY_FILLED"):
+            px = fill_price or order.price or self._latest_mark_prices.get(order.symbol, 100.0)
+            order.status = "FILLED"
+            order.filled_qty = order.quantity
+            order.avg_price = px
+            self._execute_fill(order.symbol, order.side, order.quantity, px, order.reduce_only)
+
     async def create_algo_order(
         self,
         symbol: str,

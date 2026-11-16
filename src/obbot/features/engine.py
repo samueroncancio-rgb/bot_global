@@ -51,6 +51,19 @@ class FeatureVector:
     funding_rate: float
     open_interest_usd: float
 
+    @property
+    def global_delta_z(self) -> float:
+        """Alias para global_delta (suma ponderada de z-scores de delta)."""
+        return self.global_delta
+
+    @property
+    def obi_10_levels(self) -> float:
+        """Obtiene el OBI medio a 10 niveles entre los exchanges disponibles."""
+        obis = [
+            depth_map.get(10, 0.0) for depth_map in self.obi_by_exchange.values() if 10 in depth_map
+        ]
+        return sum(obis) / len(obis) if obis else 0.0
+
 
 class FeatureEngine:
     """Motor de features en memoria idéntico para ejecución en tiempo real y backtest."""
