@@ -1,0 +1,47 @@
+exchanges:
+  binance:
+    enabled: true
+    is_execution: true
+    rest_url: "https://fapi.binance.com"
+    rest_testnet_url: "https://testnet.binancefuture.com"
+    # URLs de WebSocket divididas estrictamente por categoría (retirada de /ws legacy el 2026-04-23)
+    ws_public_url: "wss://fstream.binance.com/public"
+    ws_market_url: "wss://fstream.binance.com/market"
+    ws_private_url: "wss://fstream.binance.com/private"
+    rate_limits:
+      max_weight_per_minute: 2400
+      safety_threshold_pct: 0.80
+    reconnect:
+      base_delay_ms: 500
+      max_delay_ms: 10000
+      jitter_factor: 0.25
+
+  okx:
+    enabled: true
+    is_execution: false
+    rest_url: "https://www.okx.com"
+    ws_public_url: "wss://ws.okx.com:8443/ws/v5/public"
+    reconnect:
+      base_delay_ms: 500
+      max_delay_ms: 10000
+      jitter_factor: 0.25
+
+  bybit:
+    enabled: true
+    is_execution: false
+    rest_url: "https://api.bybit.com"
+    ws_public_url: "wss://stream.bybit.com/v5/public/linear"
+    reconnect:
+      base_delay_ms: 500
+      max_delay_ms: 10000
+      jitter_factor: 0.25
+
+  hyperliquid:
+    enabled: true
+    is_execution: false
+    rest_url: "https://api.hyperliquid.xyz"
+    ws_public_url: "wss://api.hyperliquid.xyz/ws"
+    reconnect:
+      base_delay_ms: 500
+      max_delay_ms: 10000
+      jitter_factor: 0.25

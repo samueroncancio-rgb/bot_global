@@ -1,0 +1,24 @@
+features:
+  sampling_interval_ms: 100
+
+  delta:
+    rolling_windows_sec: [60, 300, 900]
+    z_score_min_samples: 30
+
+  weights:
+    volume_share_alpha: 0.70
+    oi_share_beta: 0.30
+    ema_alpha: 0.05
+    clamp_min: 0.05
+    clamp_max: 0.60
+
+  obi:
+    levels: [5, 10, 20]
+    decay_lambda: 0.10
+
+  cvd:
+    session_reset_hours: 24
+
+  liquidations:
+    rolling_window_sec: 60
+    treat_as_intensity_proxy: true  # Binance forceOrder está muestreado a 1/s

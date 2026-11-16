@@ -1,0 +1,50 @@
+symbols:
+  BTC-USDT-PERP:
+    base_asset: "BTC"
+    quote_asset: "USDT"
+    settlement_asset: "USDT"
+    contract_type: "perpetual"
+    tick_size: "0.10"
+    step_size: "0.001"
+    min_qty: "0.001"
+    min_notional_usd: "5.0"
+    exchange_mapping:
+      binance: "BTCUSDT"
+      okx: "BTC-USDT-SWAP"
+      bybit: "BTCUSDT"
+      hyperliquid: "BTC"
+    contract_multipliers:
+      binance: "1.0"
+      okx: "0.01"        # En OKX 1 contrato SWAP de BTC-USDT equivale a 0.01 BTC
+      bybit: "1.0"
+      hyperliquid: "1.0"
+    weights_prior:
+      binance: 0.48
+      okx: 0.20
+      hyperliquid: 0.18
+      bybit: 0.14
+
+  ETH-USDT-PERP:
+    base_asset: "ETH"
+    quote_asset: "USDT"
+    settlement_asset: "USDT"
+    contract_type: "perpetual"
+    tick_size: "0.01"
+    step_size: "0.01"
+    min_qty: "0.01"
+    min_notional_usd: "5.0"
+    exchange_mapping:
+      binance: "ETHUSDT"
+      okx: "ETH-USDT-SWAP"
+      bybit: "ETHUSDT"
+      hyperliquid: "ETH"
+    contract_multipliers:
+      binance: "1.0"
+      okx: "0.1"         # En OKX 1 contrato SWAP de ETH-USDT equivale a 0.1 ETH
+      bybit: "1.0"
+      hyperliquid: "1.0"
+    weights_prior:
+      binance: 0.48
+      okx: 0.20
+      hyperliquid: 0.18
+      bybit: 0.14

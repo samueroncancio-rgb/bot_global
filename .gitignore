@@ -1,0 +1,37 @@
+# Git ignore para orderflow-bot
+
+# Entornos virtuales y herramientas locales
+.venv/
+.uv_data/
+.bin/
+uv.lock
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Tipado y linters
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Configuración secreta y variables de entorno
+.env
+!.env.example
+
+# Datos locales del lakehouse y logs
+data/
+storage/
+lakehouse/
+*.json.zst
+*.parquet
+*.log
+
+# Docker / MinIO / Redpanda volúmenes locales
+.minio/
+.redpanda/
+
