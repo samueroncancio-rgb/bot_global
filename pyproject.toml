@@ -98,6 +98,8 @@ exclude = [
 module = [
     "aiokafka.*",
     "sortedcontainers.*",
+    "pyarrow.*",
+    "zstandard.*",
 ]
 ignore_missing_imports = true
 

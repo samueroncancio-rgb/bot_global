@@ -26,7 +26,7 @@ htmlcov/
 # Datos locales del lakehouse y logs
 data/
 storage/
-lakehouse/
+/lakehouse/
 *.json.zst
 *.parquet
 *.log
