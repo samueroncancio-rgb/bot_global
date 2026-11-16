@@ -42,3 +42,4 @@ class GeminiProvider(LLMProvider):
         except Exception as exc:
             logger.error("llm.gemini_generate_failed: %s", exc)
             raise
+

@@ -59,3 +59,4 @@ async def test_binance_rest_blocks_conditional_orders_in_regular_endpoint() -> N
             order_type="STOP_MARKET",
             quantity=0.01,
         )
+

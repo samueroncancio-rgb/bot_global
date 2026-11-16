@@ -40,3 +40,4 @@ class CVDTracker:
         """Reinicia los acumuladores (e.g. al inicio de una nueva sesión)."""
         self._cvd_by_exchange.clear()
         self._global_cvd = 0.0
+

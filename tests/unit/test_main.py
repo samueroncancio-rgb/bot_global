@@ -42,3 +42,4 @@ async def test_order_flow_bot_app_start_and_stop() -> None:
 
         await app.stop()
         assert app.running is False
+

@@ -111,3 +111,4 @@ class BaselineOrderFlowStrategy(Strategy):
     def on_order_update(self, order: ManagedOrder) -> None:
         """Actualiza el seguimiento de órdenes abiertas."""
         self._active_orders[order.client_order_id] = order
+

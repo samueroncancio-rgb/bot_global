@@ -28,3 +28,4 @@ def test_liquidation_metrics_and_eviction() -> None:
     metrics_empty = tracker.get_metrics(current_ts_ns=80_000_000_000)
     assert metrics_empty.total_events == 0
     assert metrics_empty.buy_liq_notional_usd == 0.0
+

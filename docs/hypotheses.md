@@ -51,3 +51,4 @@ Ráfagas concentradas de órdenes de liquidación forzada en Binance, OKX o Bybi
 2. **Criterio de Falsación:**
    * La hipótesis se considera **falsada** si tras un choque de liquidaciones el precio continúa en la dirección de la liquidación sin reversión mínima del $30\%$ del impacto en los siguientes 5 segundos ($\text{Reversión} < 0.30 \cdot \text{Impacto}$).
    * Si no hay reversión, el flujo de liquidación se trata como información direccional persistente (momentum) en lugar de una anomalía de agotamiento de inventario.
+

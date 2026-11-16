@@ -96,3 +96,4 @@ def start_metrics_server(port: int = 8000) -> None:
         )
     except Exception as exc:
         logger.warning("obs.metrics_server_start_failed: %s", exc)
+

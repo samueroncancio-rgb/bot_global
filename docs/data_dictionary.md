@@ -83,3 +83,4 @@ Tasa de financiación e Interés Abierto (Open Interest).
   - `delta_volume`: `Float64` (`buy_volume - sell_volume`)
   - `delta_notional_usd`: `Float64`
   - `cvd`: `Float64` (Delta acumulado histórico en la sesión)
+

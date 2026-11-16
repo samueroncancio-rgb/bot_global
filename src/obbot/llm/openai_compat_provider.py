@@ -46,3 +46,4 @@ class OpenAICompatProvider(LLMProvider):
         except Exception as exc:
             logger.error("llm.openai_generate_failed: %s", exc)
             raise
+

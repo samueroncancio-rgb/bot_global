@@ -75,3 +75,4 @@ async def test_paper_engine_algo_stop_loss_trigger() -> None:
     assert positions[0]["positionAmt"] == 0.0
     # Pérdida de 0.1 * (48900 - 50000) = -110 USD
     assert engine.wallet_balance == pytest.approx(9890.0, abs=1e-6)
+

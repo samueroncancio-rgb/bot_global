@@ -97,3 +97,4 @@ Cualquier intento de suscribir canales de mercado en la conexión `/public` o en
 
 ### Proyección Acotada al Símplex en Pesos Dinámicos
 Para evitar que un exchange domine el cálculo del Delta Global o que otro quede anulado, los pesos $w_i(t)$ se calculan mediante una proyección euclidiana sobre el símplex unitario $\sum w_i = 1.0$ con cotas estrictas $w_i \in [0.05, 0.60]$ resuelta por bisección monótona en tiempo $O(N \log \frac{1}{\epsilon})$.
+

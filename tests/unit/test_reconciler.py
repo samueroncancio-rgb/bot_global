@@ -69,3 +69,4 @@ async def test_reconciler_synchronizes_closed_orders_and_positions() -> None:
     assert positions[0].unrealized_pnl == 5.0
     assert portfolio.positions is not None
     assert "BTCUSDT" in portfolio.positions
+

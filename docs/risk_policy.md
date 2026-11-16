@@ -92,3 +92,4 @@ Antes de que cualquier orden llegue a la capa de ejecución, `RiskGuard` ejecuta
 1. **Análisis de Causa Raíz**: Tras un disparo del Kill-Switch, el sistema no se reactiva automáticamente. Un operador debe inspeccionar los logs JSON estructurados.
 2. **Reconciliación de Estado**: Ejecución manual o automática del reconciliador REST contra Binance (`/fapi/v1/positionRisk` y `/fapi/v1/openOrders`) para certificar inventario neutro.
 3. **Comando de Desarme**: El kill-switch solo puede ser desarmado mediante una llamada explícita `reset(layer, operator_signature)`.
+

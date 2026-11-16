@@ -210,3 +210,4 @@ def test_risk_guard_blocks_on_kill_switch_active() -> None:
     )
     decision_exit = guard.evaluate_order(exit_order, portfolio, 50000.0, now_ns)
     assert decision_exit.approved
+

@@ -104,3 +104,4 @@ report = await reconciler.reconcile_orders()
 positions = await reconciler.reconcile_positions(portfolio)
 ```
 El principio "Gana el exchange" asegurará que el inventario reportado por `/fapi/v1/positionRisk` sea la única fuente de verdad.
+
