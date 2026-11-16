@@ -4,11 +4,36 @@ import json
 import logging
 import sys
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 
 class JSONFormatter(logging.Formatter):
     """Formateador de logs en formato JSON para trazabilidad y observabilidad."""
+
+    STANDARD_ATTRS: ClassVar[set[str]] = {
+        "name",
+        "msg",
+        "args",
+        "levelname",
+        "levelno",
+        "pathname",
+        "filename",
+        "module",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "lineno",
+        "funcName",
+        "created",
+        "msecs",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "processName",
+        "process",
+        "message",
+        "taskName",
+    }
 
     def format(self, record: logging.LogRecord) -> str:
         log_entry: dict[str, Any] = {
@@ -18,18 +43,10 @@ class JSONFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
 
-        # Inyectar campos de contexto si existen en record.__dict__
-        context_keys = (
-            "trace_id",
-            "client_order_id",
-            "symbol",
-            "exchange",
-            "event_type",
-            "latency_ms",
-        )
-        for key in context_keys:
-            if hasattr(record, key):
-                log_entry[key] = getattr(record, key)
+        # Inyectar cualquier atributo adicional presente en record.__dict__
+        for key, val in record.__dict__.items():
+            if key not in self.STANDARD_ATTRS:
+                log_entry[key] = val
 
         if record.exc_info:
             log_entry["exception"] = self.formatException(record.exc_info)
