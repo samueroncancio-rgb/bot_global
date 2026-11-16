@@ -13,6 +13,10 @@ class Clock(ABC):
         """Retorna el timestamp actual en nanosegundos."""
         ...
 
+    def now_ns(self) -> int:
+        """Retorna el timestamp actual en nanosegundos (alias de time_ns)."""
+        return self.time_ns()
+
     def time_ms(self) -> int:
         """Retorna el timestamp actual en milisegundos."""
         return self.time_ns() // 1_000_000
