@@ -22,3 +22,4 @@ features:
   liquidations:
     rolling_window_sec: 60
     treat_as_intensity_proxy: true  # Binance forceOrder está muestreado a 1/s
+

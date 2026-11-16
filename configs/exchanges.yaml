@@ -45,3 +45,4 @@ exchanges:
       base_delay_ms: 500
       max_delay_ms: 10000
       jitter_factor: 0.25
+

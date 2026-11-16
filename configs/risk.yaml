@@ -24,3 +24,4 @@ risk:
     stop_loss_attach_timeout_ms: 1500
     emergency_order_type: "MARKET"
     emergency_reduce_only: true
+

@@ -97,6 +97,7 @@ exclude = [
 [[tool.mypy.overrides]]
 module = [
     "aiokafka.*",
+    "sortedcontainers.*",
 ]
 ignore_missing_imports = true
 

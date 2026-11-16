@@ -95,3 +95,4 @@ volumes:
   minio-data:
   prometheus-data:
   grafana-data:
+
