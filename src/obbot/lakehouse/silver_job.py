@@ -1,10 +1,12 @@
-"""Proceso de transformación y tipado de Bronze a Silver en Apache Parquet comprimido con Zstandard."""
+"""Proceso de transformación Bronze a Silver en Parquet comprimido con Zstandard."""
 
 import io
 import json
 from typing import Any
+
 import polars as pl
 import zstandard as zstd
+
 from obbot.common.logging import get_logger
 from obbot.lakehouse.s3 import StorageBackend
 

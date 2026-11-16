@@ -1,8 +1,10 @@
-"""Proceso de agregación analítica de Silver a Gold para métricas de microestructura y barras de order flow."""
+"""Proceso de agregación analítica de Silver a Gold para barras de order flow."""
 
 import io
+
 import duckdb
 import polars as pl
+
 from obbot.common.logging import get_logger
 from obbot.lakehouse.s3 import StorageBackend
 
@@ -51,7 +53,9 @@ class GoldJob:
             SUM(CASE WHEN side = 'BUY' THEN size ELSE 0.0 END) AS buy_volume,
             SUM(CASE WHEN side = 'SELL' THEN size ELSE 0.0 END) AS sell_volume,
             SUM(CASE WHEN side = 'BUY' THEN size ELSE -size END) AS delta_volume,
-            SUM(CASE WHEN side = 'BUY' THEN notional_usd ELSE -notional_usd END) AS delta_notional_usd
+            SUM(
+                CASE WHEN side = 'BUY' THEN notional_usd ELSE -notional_usd END
+            ) AS delta_notional_usd
         FROM trades
         GROUP BY symbol, bucket_ts_sec
         ORDER BY bucket_ts_sec ASC

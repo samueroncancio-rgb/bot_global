@@ -4,7 +4,9 @@ import hashlib
 import heapq
 import json
 from typing import Any
+
 import zstandard as zstd
+
 from obbot.bus.base import EventBus
 from obbot.common.clock import SimulationClock
 from obbot.common.events import (
@@ -163,7 +165,9 @@ class DeterministicReplayEngine:
             self.clock.set_time_ns(ts_recv_ns)
 
             # Actualizar hash determinista de la secuencia
-            event_repr = f"{topic}:{event.ts_recv_ns}:{getattr(event, 'symbol', '')}:{getattr(event, 'price', 0.0)}"
+            sym = getattr(event, "symbol", "")
+            px = getattr(event, "price", 0.0)
+            event_repr = f"{topic}:{event.ts_recv_ns}:{sym}:{px}"
             hasher.update(event_repr.encode("utf-8"))
 
             await self.bus.publish(topic, event)

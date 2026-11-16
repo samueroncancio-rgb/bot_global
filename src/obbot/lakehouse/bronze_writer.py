@@ -1,13 +1,16 @@
 """Escritor en streaming de la capa Bronze en formato NDJSON comprimido con Zstandard."""
 
 import asyncio
-from datetime import datetime, timezone
+import contextlib
 import json
+from datetime import UTC, datetime
 from typing import Any
+
 import zstandard as zstd
+
 from obbot.bus.base import EventBus
 from obbot.common.clock import Clock, SystemClock
-from obbot.common.events import EventBase, MarketEvent, event_to_dict
+from obbot.common.events import EventBase, event_to_dict
 from obbot.common.logging import get_logger
 from obbot.lakehouse.s3 import StorageBackend
 
@@ -60,10 +63,8 @@ class BronzeWriter:
         self._running = False
         if self._flush_task:
             self._flush_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._flush_task
-            except asyncio.CancelledError:
-                pass
             self._flush_task = None
 
         if self.bus:
@@ -77,7 +78,7 @@ class BronzeWriter:
 
     def _get_partition_key(self, exchange: str, channel: str, ts_recv_ns: int) -> str:
         """Genera la ruta de partición temporal: exchange/channel/YYYY-MM-DD/HH."""
-        dt = datetime.fromtimestamp(ts_recv_ns / 1e9, tz=timezone.utc)
+        dt = datetime.fromtimestamp(ts_recv_ns / 1e9, tz=UTC)
         date_str = dt.strftime("%Y-%m-%d")
         hour_str = dt.strftime("%H")
         return f"{exchange}/{channel}/{date_str}/{hour_str}"
