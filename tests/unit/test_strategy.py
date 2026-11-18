@@ -119,3 +119,112 @@ def test_baseline_strategy_no_signal_when_position_already_open() -> None:
 
     orders = strat.on_feature_vector(features, portfolio)
     assert len(orders) == 0
+
+
+def test_baseline_strategy_rejects_low_persistence_spoofing() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="BTCUSDT",
+        z_threshold=1.8,
+        obi_threshold=0.20,
+        enable_anti_spoofing=True,
+        min_persistence=0.50,
+    )
+    portfolio = PortfolioState(initial_daily_balance=10000.0, current_wallet_balance=10000.0)
+
+    # Señal fuerte pero persistencia baja (rho = 0.20 < 0.50 -> quote flickering / spoofing)
+    features = FeatureVector(
+        symbol="BTCUSDT",
+        timestamp_ns=1_000_000_000,
+        delta_by_exchange={"binance": 100.0},
+        z_delta_by_exchange={"binance": 2.5},
+        weights_by_exchange={"binance": 1.0},
+        global_delta=2.5,
+        cvd_by_exchange={"binance": 500000.0},
+        global_cvd=500000.0,
+        obi_by_exchange={"binance": {5: 0.35, 10: 0.35, 20: 0.35}},
+        liquidity_persistence=0.20,  # Persistencia baja
+        mid_price=50000.0,
+        spread_bps=1.0,
+        basis_bps_by_exchange={"binance": 0.0},
+        realized_volatility=0.01,
+        liquidation_intensity=0.0,
+        funding_rate=0.0001,
+        open_interest_usd=1000000.0,
+    )
+
+    orders = strat.on_feature_vector(features, portfolio)
+    assert len(orders) == 0, "Debe rechazar la señal ante persistencia baja de liquidez"
+
+
+def test_baseline_strategy_rejects_phantom_wall() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="BTCUSDT",
+        z_threshold=1.8,
+        obi_threshold=0.20,
+        enable_anti_spoofing=True,
+    )
+    portfolio = PortfolioState(initial_daily_balance=10000.0, current_wallet_balance=10000.0)
+
+    # Muro fantasma: OBI a 20 niveles es alcista (+0.40), pero a 5 niveles inmediatos es vendedor (-0.15)
+    features = FeatureVector(
+        symbol="BTCUSDT",
+        timestamp_ns=1_000_000_000,
+        delta_by_exchange={"binance": 100.0},
+        z_delta_by_exchange={"binance": 2.5},
+        weights_by_exchange={"binance": 1.0},
+        global_delta=2.5,
+        cvd_by_exchange={"binance": 500000.0},
+        global_cvd=500000.0,
+        obi_by_exchange={"binance": {5: -0.15, 10: 0.25, 20: 0.40}},
+        liquidity_persistence=0.85,
+        mid_price=50000.0,
+        spread_bps=1.0,
+        basis_bps_by_exchange={"binance": 0.0},
+        realized_volatility=0.01,
+        liquidation_intensity=0.0,
+        funding_rate=0.0001,
+        open_interest_usd=1000000.0,
+    )
+
+    orders = strat.on_feature_vector(features, portfolio)
+    assert len(orders) == 0, "Debe rechazar la señal ante un muro fantasma en niveles lejanos"
+
+
+def test_baseline_strategy_rejects_isolated_exchange_spoofing() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="BTCUSDT",
+        z_threshold=1.8,
+        obi_threshold=0.20,
+        enable_anti_spoofing=True,
+        min_confirming_venues=2,
+    )
+    portfolio = PortfolioState(initial_daily_balance=10000.0, current_wallet_balance=10000.0)
+
+    # Solo Binance reporta compra (+0.45), mientras que Bybit y OKX reportan libro vendedor (-0.30, -0.20)
+    features = FeatureVector(
+        symbol="BTCUSDT",
+        timestamp_ns=1_000_000_000,
+        delta_by_exchange={"binance": 100.0},
+        z_delta_by_exchange={"binance": 2.5},
+        weights_by_exchange={"binance": 1.0},
+        global_delta=2.5,
+        cvd_by_exchange={"binance": 500000.0},
+        global_cvd=500000.0,
+        obi_by_exchange={
+            "binance": {5: 0.45, 10: 0.45, 20: 0.45},
+            "bybit": {5: -0.30, 10: -0.30, 20: -0.30},
+            "okx": {5: -0.20, 10: -0.20, 20: -0.20},
+        },
+        liquidity_persistence=0.85,
+        mid_price=50000.0,
+        spread_bps=1.0,
+        basis_bps_by_exchange={"binance": 0.0},
+        realized_volatility=0.01,
+        liquidation_intensity=0.0,
+        funding_rate=0.0001,
+        open_interest_usd=1000000.0,
+    )
+
+    orders = strat.on_feature_vector(features, portfolio)
+    assert len(orders) == 0, "Debe rechazar spoofing monoplataforma sin confirmación multi-exchange"
+

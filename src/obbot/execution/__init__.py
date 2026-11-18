@@ -4,7 +4,7 @@ from obbot.execution.algo_orders import BinanceAlgoOrderClient
 from obbot.execution.binance_private_ws import BinancePrivateWsClient
 from obbot.execution.binance_rest import BinanceFuturesRestClient, BinanceRestError
 from obbot.execution.order_manager import ManagedOrder, OrderManager, OrderStatus
-from obbot.execution.paper import PaperExecutionEngine
+from obbot.execution.paper import PaperAlgoClient, PaperExecutionEngine, PaperRestClient
 from obbot.execution.reconciler import StateReconciler
 
 __all__ = [
@@ -15,7 +15,9 @@ __all__ = [
     "ManagedOrder",
     "OrderManager",
     "OrderStatus",
+    "PaperAlgoClient",
     "PaperExecutionEngine",
+    "PaperRestClient",
     "StateReconciler",
 ]
 

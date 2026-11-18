@@ -11,13 +11,25 @@ from obbot.bus.memory import InMemoryEventBus
 from obbot.bus.redpanda import RedpandaEventBus
 from obbot.common.clock import Clock, SystemClock
 from obbot.common.config import AppConfig
-from obbot.common.events import BookSnapshotEvent, EventBase, TradeEvent
+from obbot.common.events import (
+    BookDeltaEvent,
+    BookSnapshotEvent,
+    EventBase,
+    FundingOIEvent,
+    LiquidationEvent,
+    TradeEvent,
+)
 from obbot.common.logging import get_logger, setup_logging
 from obbot.common.registry import InstrumentRegistry
 from obbot.execution.algo_orders import BinanceAlgoOrderClient
+from obbot.execution.binance_private_ws import BinancePrivateWsClient
 from obbot.execution.binance_rest import BinanceFuturesRestClient
 from obbot.execution.order_manager import OrderManager
-from obbot.execution.paper import PaperExecutionEngine
+from obbot.execution.paper import (
+    PaperAlgoClient,
+    PaperExecutionEngine,
+    PaperRestClient,
+)
 from obbot.execution.reconciler import StateReconciler
 from obbot.features.engine import FeatureEngine
 from obbot.ingestion.binance import BinanceAdapter
@@ -30,7 +42,7 @@ from obbot.obs.health import HealthServer
 from obbot.obs.metrics import start_metrics_server
 from obbot.risk.guard import RiskGuard
 from obbot.risk.kill_switch import FiveLayerKillSwitch, KillSwitchAction
-from obbot.risk.limits import PortfolioState, RiskLimits
+from obbot.risk.limits import PortfolioState, PositionState, RiskLimits
 from obbot.strategy.baseline_example import BaselineOrderFlowStrategy
 
 logger = get_logger("main")
@@ -47,6 +59,8 @@ class OrderFlowBotApp:
         self.bus: EventBus | None = None
         self.running = False
         self._tasks: list[asyncio.Task[Any]] = []
+        self._last_event_ts_ns: int = 0
+        self._last_rtt_ms: float = 50.0
 
     async def start(self) -> None:
         """Inicia todos los subsistemas de forma secuencial y supervisada."""
@@ -96,17 +110,21 @@ class OrderFlowBotApp:
         self.portfolio = PortfolioState(
             initial_daily_balance=10000.0,
             current_wallet_balance=10000.0,
+            positions={},
         )
 
-        # 5. Ejecución (Paper o Testnet)
+        # 5. Ejecución (Paper o Testnet/Live)
         if self.mode == "paper":
             self.paper_engine = PaperExecutionEngine(
                 initial_balance=10000.0,
                 clock=self.clock,
+                maker_fee_rate=0.0002,
+                taker_fee_rate=0.0005,
+                slippage_bps=1.0,
+                on_fill_callback=self._handle_paper_fill,
             )
-            # Adaptador rest mock para paper
-            rest_client = BinanceFuturesRestClient("paper_key", "paper_secret", testnet=True)
-            algo_client = BinanceAlgoOrderClient(rest_client)
+            rest_client = PaperRestClient(self.paper_engine)
+            algo_client = PaperAlgoClient(self.paper_engine, rest_client)
         else:
             rest_client = BinanceFuturesRestClient(
                 api_key=self.config.env.binance_api_key,
@@ -115,6 +133,15 @@ class OrderFlowBotApp:
             )
             algo_client = BinanceAlgoOrderClient(rest_client)
             await rest_client.sync_server_time()
+
+            # Conexión WebSocket privada de Binance para User Data Stream
+            self.private_ws = BinancePrivateWsClient(
+                rest_client=rest_client,
+                testnet=self.mode == "testnet",
+                clock=self.clock,
+                on_order_update=self._handle_private_order_update,
+            )
+            await self.private_ws.start()
 
         self.order_manager = OrderManager(
             rest_client=rest_client,
@@ -130,7 +157,10 @@ class OrderFlowBotApp:
         )
 
         # 6. Estrategia Baseline
-        self.strategy = BaselineOrderFlowStrategy(symbol=self.symbol)
+        self.strategy = BaselineOrderFlowStrategy(
+            symbol=self.symbol,
+            use_dynamic_volatility=True,
+        )
 
         # 7. Iniciar Observabilidad (Métricas Prometheus y Health Checks)
         start_metrics_server(port=self.config.env.metrics_port)
@@ -152,9 +182,11 @@ class OrderFlowBotApp:
         self.registry = InstrumentRegistry()
         self.registry.load_from_dict(self.config.symbols)
 
-        # 9. Suscripción y Conexión de Ingesta
+        # 9. Suscripción y Conexión de Ingesta Completa (trades, books, liqs, funding/OI)
         await self.bus.subscribe("trades.v1", self._on_bus_trade)
         await self.bus.subscribe("book.v1", self._on_bus_book)
+        await self.bus.subscribe("liquidations.v1", self._on_bus_liquidation)
+        await self.bus.subscribe("funding_oi.v1", self._on_bus_funding_oi)
 
         symbols = [self.symbol]
         self.adapters = [
@@ -169,23 +201,155 @@ class OrderFlowBotApp:
         for adapter in self.adapters:
             await adapter.start()
 
+        # 10. Iniciar Tareas Supervisoras en Segundo Plano
+        # A) Bucle de reconciliación periódica (cada 15s)
+        self._tasks.append(
+            asyncio.create_task(
+                self.reconciler.run_periodic_loop(self.portfolio, interval_sec=15.0)
+            )
+        )
+        # B) Bucle supervisor del Kill-Switch de 5 capas (cada 100ms)
+        self._tasks.append(asyncio.create_task(self._run_risk_supervisor()))
+        # C) Bucle de estrategia desacoplado (100ms)
+        self._tasks.append(asyncio.create_task(self._run_strategy_loop()))
+
         logger.info("app.started_successfully: listening for order flow events")
 
+    async def _handle_order_fill_event(
+        self,
+        client_order_id: str,
+        filled_qty: float,
+        avg_price: float,
+        side: str = "BUY",
+    ) -> None:
+        """Procesa la confirmación de fill de una orden, adjunta stop-loss y actualiza posición."""
+        await self.order_manager.on_order_fill(client_order_id, filled_qty, avg_price)
+
+        # Actualizar positions en PortfolioState
+        if self.portfolio.positions is None:
+            self.portfolio.positions = {}
+
+        direction = 1.0 if side.upper() == "BUY" else -1.0
+        current_pos = self.portfolio.positions.get(self.symbol)
+        if current_pos:
+            current_pos.size += filled_qty * direction
+            current_pos.mark_price = avg_price
+        else:
+            self.portfolio.positions[self.symbol] = PositionState(
+                symbol=self.symbol,
+                size=filled_qty * direction,
+                entry_price=avg_price,
+                mark_price=avg_price,
+                unrealized_pnl=0.0,
+                leverage=3,
+                margin_type="ISOLATED",
+            )
+
+        # Notificar a la estrategia sobre el estado de la orden
+        order = self.order_manager.get_order(client_order_id)
+        if order:
+            self.strategy.on_order_update(order)
+
+    async def _handle_paper_fill(
+        self,
+        client_order_id: str,
+        filled_qty: float,
+        avg_price: float,
+        side: str,
+    ) -> None:
+        """Callback invocado por PaperExecutionEngine ante un fill simulado."""
+        await self._handle_order_fill_event(client_order_id, filled_qty, avg_price, side)
+
+    async def _handle_private_order_update(self, order_data: dict[str, Any]) -> None:
+        """Callback invocado por BinancePrivateWsClient ante ORDER_TRADE_UPDATE."""
+        status = order_data.get("X")
+        cid = order_data.get("c", "")
+        cum_qty = float(order_data.get("z", 0.0))
+        avg_px = float(order_data.get("ap", 0.0))
+        side = order_data.get("S", "BUY")
+
+        if status == "FILLED":
+            await self._handle_order_fill_event(cid, cum_qty, avg_px, side)
+
     async def _on_bus_trade(self, topic: str, event: EventBase) -> None:
-        """Procesa un trade del bus, actualiza features y evalúa estrategia."""
+        """Procesa un trade del bus y actualiza el motor de features y mark price."""
         if isinstance(event, TradeEvent):
+            self._last_event_ts_ns = event.ts_recv_ns
             self.feature_engine.on_trade(event)
-            now_ns = self.clock.now_ns()
-            fv = self.feature_engine.compute_feature_vector(now_ns)
-            if fv and fv.mid_price > 0.0:
-                orders = self.strategy.on_feature_vector(fv, self.portfolio)
-                for req in orders:
-                    await self.order_manager.submit_order(req, self.portfolio, fv.mid_price)
+            if self.mode == "paper" and hasattr(self, "paper_engine"):
+                self.paper_engine.set_mark_price(event.symbol, event.price)
 
     async def _on_bus_book(self, topic: str, event: EventBase) -> None:
-        """Procesa una actualización de libro de órdenes."""
+        """Procesa actualizaciones snapshots y deltas del libro de órdenes L2."""
         if isinstance(event, BookSnapshotEvent):
+            self._last_event_ts_ns = event.ts_recv_ns
             self.feature_engine.on_book_snapshot(event)
+        elif isinstance(event, BookDeltaEvent):
+            self._last_event_ts_ns = event.ts_recv_ns
+            self.feature_engine.on_book_delta(event)
+
+    async def _on_bus_liquidation(self, topic: str, event: EventBase) -> None:
+        """Procesa eventos de liquidación forzada."""
+        if isinstance(event, LiquidationEvent):
+            self._last_event_ts_ns = event.ts_recv_ns
+            self.feature_engine.on_liquidation(event)
+
+    async def _on_bus_funding_oi(self, topic: str, event: EventBase) -> None:
+        """Procesa actualizaciones de funding rate y Open Interest."""
+        if isinstance(event, FundingOIEvent):
+            self._last_event_ts_ns = event.ts_recv_ns
+            self.feature_engine.on_funding_oi(event)
+
+    async def _run_strategy_loop(self) -> None:
+        """Bucle desacoplado a 10 Hz (100ms) para evaluación cuantitativa y ejecución."""
+        interval_sec = (
+            self.config.features.get("features", {}).get("sampling_interval_ms", 100) / 1000.0
+        )
+        while self.running:
+            try:
+                await asyncio.sleep(interval_sec)
+                now_ns = self.clock.now_ns()
+                fv = self.feature_engine.compute_feature_vector(now_ns)
+                if fv and fv.mid_price > 0.0:
+                    orders = self.strategy.on_feature_vector(fv, self.portfolio)
+                    for req in orders:
+                        await self.order_manager.submit_order(req, self.portfolio, fv.mid_price)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error("strategy_loop.error: %s", exc)
+
+    async def _run_risk_supervisor(self) -> None:
+        """Bucle supervisor de salud del Kill-Switch de 5 capas (cada 100ms con warmup)."""
+        # Periodo de calentamiento (warmup) para estabilización de WebSockets iniciales
+        await asyncio.sleep(5.0)
+        while self.running:
+            try:
+                now_ns = self.clock.now_ns()
+                last_ev = self._last_event_ts_ns or now_ns
+
+                # Capa 1: Integridad y frescura de datos
+                self.kill_switch.check_data_integrity(
+                    now_ns=now_ns,
+                    last_event_ts_ns=last_ev,
+                    book_synced=True,
+                )
+                # Capa 2: Conectividad y latencia RTT
+                self.kill_switch.check_connectivity(
+                    rtt_ms=self._last_rtt_ms,
+                    now_ns=now_ns,
+                )
+                # Capa 3: Riesgo financiero y drawdown acumulado
+                self.kill_switch.check_financial(
+                    now_ns=now_ns,
+                    current_wallet_balance=self.portfolio.current_wallet_balance,
+                    initial_daily_balance=self.portfolio.initial_daily_balance,
+                )
+                await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error("risk_supervisor.error: %s", exc)
 
     async def stop(self) -> None:
         """Detiene todos los servicios ordenadamente."""
@@ -201,19 +365,30 @@ class OrderFlowBotApp:
             action=KillSwitchAction.BLOCK_NEW_ENTRIES,
         )
 
-        # 2. Detener adaptadores de ingestión
+        # 2. Cancelar tareas en segundo plano
+        for t in self._tasks:
+            t.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+            self._tasks.clear()
+
+        # 3. Detener Private WS si estaba activo
+        if hasattr(self, "private_ws"):
+            await self.private_ws.stop()
+
+        # 4. Detener adaptadores de ingestión
         for adapter in self.adapters:
             await adapter.stop()
 
-        # 3. Detener BronzeWriter y volcar buffers
+        # 5. Detener BronzeWriter y volcar buffers
         if hasattr(self, "bronze_writer"):
             await self.bronze_writer.stop()
 
-        # 4. Detener Servidor de Salud
+        # 6. Detener Servidor de Salud
         if hasattr(self, "health_server"):
             await self.health_server.stop()
 
-        # 5. Detener Bus
+        # 7. Detener Bus
         if self.bus:
             await self.bus.stop()
 
