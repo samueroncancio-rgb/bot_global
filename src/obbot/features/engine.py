@@ -162,16 +162,30 @@ class FeatureEngine:
             self.weight_calculator.record_oi(event.exchange, event.open_interest_usd)
 
     def _compute_realized_volatility(self) -> float:
-        """Calcula la volatilidad realizada anualizada sobre los últimos retornos."""
+        """Calcula la volatilidad realizada escalada a una ventana de 60 segundos."""
         if len(self._price_history) < 10:
             return 0.0
 
         prices = [p for _, p in self._price_history]
-        returns = [math.log(prices[i] / prices[i - 1]) for i in range(1, len(prices))]
+        returns = [
+            math.log(prices[i] / prices[i - 1])
+            for i in range(1, len(prices))
+            if prices[i - 1] > 0.0
+        ]
+        if not returns:
+            return 0.0
 
         mean_ret = sum(returns) / len(returns)
         var = sum((r - mean_ret) ** 2 for r in returns) / len(returns)
-        return math.sqrt(var)
+        tick_vol = math.sqrt(var)
+
+        # Escalar a horizonte de 60 segundos según intensidad temporal de trades
+        first_ts = self._price_history[0][0]
+        last_ts = self._price_history[-1][0]
+        duration_sec = max(0.5, (last_ts - first_ts) / 1_000_000_000.0)
+        trades_per_sec = len(returns) / duration_sec
+        scale_factor = math.sqrt(trades_per_sec * 60.0)
+        return tick_vol * scale_factor
 
     def compute_feature_vector(self, current_ts_ns: int | None = None) -> FeatureVector:
         """

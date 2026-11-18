@@ -51,16 +51,26 @@ logger = get_logger("main")
 class OrderFlowBotApp:
     """Aplicación principal que orquesta el ciclo de vida de los servicios del bot."""
 
-    def __init__(self, mode: str, symbol: str, config: AppConfig) -> None:
+    def __init__(
+        self,
+        mode: str,
+        symbol: str,
+        config: AppConfig,
+        initial_balance: float | None = None,
+    ) -> None:
         self.mode = mode
         self.symbol = symbol
         self.config = config
+        self.initial_balance = initial_balance
         self.clock: Clock = SystemClock()
         self.bus: EventBus | None = None
         self.running = False
         self._tasks: list[asyncio.Task[Any]] = []
         self._last_event_ts_ns: int = 0
         self._last_rtt_ms: float = 50.0
+        self.total_trades_received: int = 0
+        self.total_books_received: int = 0
+        self.total_orders_submitted: int = 0
 
     async def start(self) -> None:
         """Inicia todos los subsistemas de forma secuencial y supervisada."""
@@ -107,16 +117,19 @@ class OrderFlowBotApp:
         )
         self.kill_switch = FiveLayerKillSwitch(self.risk_limits)
         self.risk_guard = RiskGuard(self.risk_limits, kill_switch=self.kill_switch)
+        init_bal = self.initial_balance or float(
+            self.config.risk.get("risk", {}).get("initial_balance_usd", 100.0)
+        )
         self.portfolio = PortfolioState(
-            initial_daily_balance=10000.0,
-            current_wallet_balance=10000.0,
+            initial_daily_balance=init_bal,
+            current_wallet_balance=init_bal,
             positions={},
         )
 
         # 5. Ejecución (Paper o Testnet/Live)
         if self.mode == "paper":
             self.paper_engine = PaperExecutionEngine(
-                initial_balance=10000.0,
+                initial_balance=init_bal,
                 clock=self.clock,
                 maker_fee_rate=0.0002,
                 taker_fee_rate=0.0005,
@@ -274,6 +287,7 @@ class OrderFlowBotApp:
     async def _on_bus_trade(self, topic: str, event: EventBase) -> None:
         """Procesa un trade del bus y actualiza el motor de features y mark price."""
         if isinstance(event, TradeEvent):
+            self.total_trades_received += 1
             self._last_event_ts_ns = event.ts_recv_ns
             self.feature_engine.on_trade(event)
             if self.mode == "paper" and hasattr(self, "paper_engine"):
@@ -282,9 +296,11 @@ class OrderFlowBotApp:
     async def _on_bus_book(self, topic: str, event: EventBase) -> None:
         """Procesa actualizaciones snapshots y deltas del libro de órdenes L2."""
         if isinstance(event, BookSnapshotEvent):
+            self.total_books_received += 1
             self._last_event_ts_ns = event.ts_recv_ns
             self.feature_engine.on_book_snapshot(event)
         elif isinstance(event, BookDeltaEvent):
+            self.total_books_received += 1
             self._last_event_ts_ns = event.ts_recv_ns
             self.feature_engine.on_book_delta(event)
 
@@ -313,6 +329,7 @@ class OrderFlowBotApp:
                 if fv and fv.mid_price > 0.0:
                     orders = self.strategy.on_feature_vector(fv, self.portfolio)
                     for req in orders:
+                        self.total_orders_submitted += 1
                         await self.order_manager.submit_order(req, self.portfolio, fv.mid_price)
             except asyncio.CancelledError:
                 break
@@ -340,16 +357,27 @@ class OrderFlowBotApp:
                     now_ns=now_ns,
                 )
                 # Capa 3: Riesgo financiero y drawdown acumulado
+                init_bal = self.portfolio.initial_daily_balance
+                curr_bal = self.portfolio.current_wallet_balance
+                daily_dd = max(0.0, (init_bal - curr_bal) / init_bal) if init_bal > 0 else 0.0
+
+                unrealized_loss_pct = 0.0
+                for pos in self.portfolio.positions.values():
+                    if pos.notional_usd > 0:
+                        loss_pct = max(0.0, -pos.unrealized_pnl / pos.notional_usd)
+                        if loss_pct > unrealized_loss_pct:
+                            unrealized_loss_pct = loss_pct
+
                 self.kill_switch.check_financial(
+                    daily_drawdown_pct=daily_dd,
+                    current_unrealized_loss_pct=unrealized_loss_pct,
                     now_ns=now_ns,
-                    current_wallet_balance=self.portfolio.current_wallet_balance,
-                    initial_daily_balance=self.portfolio.initial_daily_balance,
                 )
-                await asyncio.sleep(0.1)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error("risk_supervisor.error: %s", exc)
+            await asyncio.sleep(0.1)
 
     async def stop(self) -> None:
         """Detiene todos los servicios ordenadamente."""
@@ -394,6 +422,55 @@ class OrderFlowBotApp:
 
         logger.info("app.stopped_cleanly")
 
+    def print_session_summary(self) -> None:
+        """Imprime un resumen de métricas y rendimiento al finalizar la sesión."""
+        now_ns = self.clock.now_ns()
+        fv = self.feature_engine.compute_feature_vector(now_ns)
+        initial_bal = self.portfolio.initial_daily_balance
+        final_bal = (
+            self.paper_engine.wallet_balance
+            if hasattr(self, "paper_engine")
+            else self.portfolio.current_wallet_balance
+        )
+        pnl = final_bal - initial_bal
+        pnl_pct = (pnl / initial_bal) * 100.0 if initial_bal > 0 else 0.0
+
+        positions = (
+            self.paper_engine._positions
+            if hasattr(self, "paper_engine")
+            else (self.portfolio.positions or {})
+        )
+        active_pos_str = ", ".join(
+            f"{s}: size={p.get('positionAmt', getattr(p, 'size', 0))} entry={p.get('entryPrice', getattr(p, 'entry_price', 0))}"
+            for s, p in positions.items()
+            if abs(p.get("positionAmt", getattr(p, "size", 0))) > 1e-6
+        ) or "Ninguna"
+
+        print("\n" + "=" * 70)
+        print("          RESUMEN DE SESIÓN OPERATIVA - ORDERFLOW BOT")
+        print("=" * 70)
+        print(f"  Modo de Ejecución:         {self.mode.upper()}")
+        print(f"  Símbolo Operado:           {self.symbol}")
+        print(f"  Trades Procesados:         {self.total_trades_received}")
+        print(f"  Libros L2 Procesados:      {self.total_books_received}")
+        print(f"  Órdenes Evaluadas:         {self.total_orders_submitted}")
+        print("-" * 70)
+        if fv:
+            print(f"  Último Mark Price:         ${fv.mid_price:,.2f}")
+            print(f"  Spread Actual:             {fv.spread_bps:.2f} bps")
+            print(f"  Delta Global Z-Score:      {fv.global_delta_z:+.2f}")
+            print(f"  OBI (10 niveles):          {fv.obi_10_levels:+.2f}")
+            print(f"  Persistencia Liquidez:     rho={fv.liquidity_persistence:+.2f}")
+            print(f"  Volatilidad Realizada:     {fv.realized_volatility * 100:.2f}%")
+        print("-" * 70)
+        print(f"  Balance Inicial:           ${initial_bal:,.2f}")
+        print(f"  Balance Final:             ${final_bal:,.2f}")
+        print(f"  PnL Neto:                  ${pnl:+,.2f} ({pnl_pct:+.2f}%)")
+        print(f"  Posiciones Abiertas:       {active_pos_str}")
+        ks_action = self.kill_switch.get_highest_severity_action()
+        print(f"  Estado Kill-Switch:        {ks_action.name}")
+        print("=" * 70 + "\n")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -415,6 +492,18 @@ def parse_args() -> argparse.Namespace:
         default="configs",
         help="Directorio de configuraciones YAML.",
     )
+    parser.add_argument(
+        "--duration-sec",
+        type=float,
+        default=0.0,
+        help="Duración en segundos de la sesión de ejecución (0 para infinito).",
+    )
+    parser.add_argument(
+        "--initial-balance",
+        type=float,
+        default=0.0,
+        help="Balance inicial en USD (por defecto desde risk.yaml o 100.0).",
+    )
     return parser.parse_args()
 
 
@@ -429,7 +518,12 @@ async def async_main() -> None:
         sys.exit(1)
 
     config = AppConfig(configs_dir=args.config_dir)
-    app = OrderFlowBotApp(mode=args.mode, symbol=args.symbol, config=config)
+    app = OrderFlowBotApp(
+        mode=args.mode,
+        symbol=args.symbol,
+        config=config,
+        initial_balance=args.initial_balance if args.initial_balance > 0 else None,
+    )
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -443,9 +537,19 @@ async def async_main() -> None:
 
     try:
         await app.start()
-        await stop_event.wait()
+        if args.duration_sec > 0:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=args.duration_sec)
+            except TimeoutError:
+                logger.info(
+                    "Duración configurada alcanzada (%.1fs). Finalizando sesión...",
+                    args.duration_sec,
+                )
+        else:
+            await stop_event.wait()
     finally:
         await app.stop()
+        app.print_session_summary()
 
 
 def main() -> None:

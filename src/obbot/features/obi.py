@@ -93,7 +93,7 @@ class OBICalculator:
 
         denom = sum((x - mean) ** 2 for x in vals)
         if denom <= 1e-9:
-            return 0.0
+            return 1.0 if abs(mean) > 1e-6 else 0.0
 
         num = sum((vals[t] - mean) * (vals[t - 1] - mean) for t in range(1, n))
         autocorr = num / denom
