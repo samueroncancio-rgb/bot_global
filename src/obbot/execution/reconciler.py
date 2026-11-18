@@ -49,7 +49,10 @@ class StateReconciler:
         reconciled_count = 0
         discrepancies: list[str] = []
 
-        for client_id, local_order in list(self.order_manager._orders.items()):
+        tracked_orders = self.order_manager.get_tracked_orders()
+        local_cids = set(tracked_orders.keys())
+
+        for client_id, local_order in list(tracked_orders.items()):
             is_open = local_order.status in (OrderStatus.NEW, OrderStatus.PARTIALLY_FILLED)
             if is_open and client_id not in remote_order_map:
                 # La orden ya no está abierta en Binance: consultar estado final
@@ -71,6 +74,21 @@ class StateReconciler:
                     )
                 except Exception as exc:
                     discrepancies.append(f"No se pudo consultar orden {client_id}: {exc}")
+
+        # Detección de órdenes huérfanas en Binance (no registradas localmente)
+        orphan_count = 0
+        for remote_order in remote_orders:
+            cid = str(remote_order.get("clientOrderId", ""))
+            if cid and cid not in local_cids:
+                orphan_count += 1
+                logger.warning(
+                    "reconciler.orphan_order_detected: orderId=%s clientOrderId=%s symbol=%s qty=%s",
+                    remote_order.get("orderId"),
+                    cid,
+                    remote_order.get("symbol"),
+                    remote_order.get("origQty"),
+                )
+                discrepancies.append(f"Orden huérfana en exchange detectada: {cid}")
 
         logger.info(
             "reconciler.orders_checked: open_regular=%d open_algo=%d reconciled=%d",
@@ -95,6 +113,15 @@ class StateReconciler:
         Si existe una posición abierta sin un Algo Stop-Loss activo, genera una advertencia crítica.
         """
         remote_positions = await self.rest_client.get_positions()
+        try:
+            remote_algo_orders_raw = await self.algo_client.get_open_algo_orders()
+            remote_algo_orders = (
+                remote_algo_orders_raw if isinstance(remote_algo_orders_raw, list) else []
+            )
+        except Exception as exc:
+            logger.warning("reconciler.fetch_algo_orders_failed: %s", exc)
+            remote_algo_orders = []
+
         updated_positions: list[PositionState] = []
 
         for p in remote_positions:
@@ -121,6 +148,22 @@ class StateReconciler:
             updated_positions.append(pos)
             if portfolio.positions is not None:
                 portfolio.positions[symbol] = pos
+
+            # Auditoría: Comprobar que la posición cuente con Algo Stop-Loss activo
+            expected_sl_side = "SELL" if size > 0 else "BUY"
+            has_algo_sl = any(
+                str(algo_o.get("symbol", "")).upper() == symbol.upper()
+                and str(algo_o.get("side", "")).upper() == expected_sl_side
+                and str(algo_o.get("algoType", algo_o.get("orderType", ""))).upper()
+                in ("STOP_MARKET", "STOP")
+                for algo_o in remote_algo_orders
+            )
+            if not has_algo_sl:
+                logger.critical(
+                    "reconciler.unprotected_position_detected: %s size=%.4f sin Algo Stop-Loss activo!",
+                    symbol,
+                    size,
+                )
 
         # Actualizar posiciones en portfolio
         if portfolio.positions is not None:

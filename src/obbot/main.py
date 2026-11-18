@@ -98,22 +98,27 @@ class OrderFlowBotApp:
         self.feature_engine = FeatureEngine(symbol=self.symbol)
 
         # 4. Gestión de Riesgo y Kill-Switch
+        r_cfg = self.config.risk.get("risk", {})
+        l_cfg = r_cfg.get("limits", {})
+        ks_cfg = r_cfg.get("kill_switch", {})
+        lat_cfg = r_cfg.get("latency", {})
+
         self.risk_limits = RiskLimits(
-            max_order_notional_usd=float(
-                self.config.risk.get("risk", {})
-                .get("limits", {})
-                .get("max_order_notional_usd", 2000.0)
-            ),
-            max_position_notional_usd=float(
-                self.config.risk.get("risk", {})
-                .get("limits", {})
-                .get("max_position_notional_usd", 10000.0)
-            ),
-            max_daily_drawdown_pct=float(
-                self.config.risk.get("risk", {})
-                .get("limits", {})
-                .get("max_daily_drawdown_pct", 0.03)
-            ),
+            margin_type=r_cfg.get("margin_type", "ISOLATED"),
+            position_mode=r_cfg.get("position_mode", "ONE_WAY"),
+            default_leverage=int(r_cfg.get("default_leverage", 3)),
+            max_leverage=int(r_cfg.get("max_leverage", 5)),
+            max_order_notional_usd=float(l_cfg.get("max_order_notional_usd", 100.0)),
+            max_position_notional_usd=float(l_cfg.get("max_position_notional_usd", 250.0)),
+            max_daily_drawdown_pct=float(l_cfg.get("max_daily_drawdown_pct", 0.05)),
+            max_trade_loss_pct=float(l_cfg.get("max_trade_loss_pct", 0.02)),
+            fat_finger_price_deviation_pct=float(l_cfg.get("fat_finger_price_deviation_pct", 0.02)),
+            max_data_staleness_ms=float(ks_cfg.get("max_data_staleness_ms", 1000.0)),
+            max_book_desync_ms=float(ks_cfg.get("max_book_desync_ms", 300.0)),
+            max_acceptable_rtt_ms=float(lat_cfg.get("max_acceptable_rtt_ms", 600.0)),
+            rtt_spike_multiplier=float(lat_cfg.get("rtt_spike_multiplier", 3.0)),
+            max_consecutive_order_rejections=int(ks_cfg.get("max_consecutive_order_rejections", 3)),
+            stop_loss_attach_timeout_ms=float(ks_cfg.get("stop_loss_attach_timeout_ms", 1500.0)),
         )
         self.kill_switch = FiveLayerKillSwitch(self.risk_limits)
         self.risk_guard = RiskGuard(self.risk_limits, kill_switch=self.kill_switch)
@@ -136,8 +141,8 @@ class OrderFlowBotApp:
                 slippage_bps=1.0,
                 on_fill_callback=self._handle_paper_fill,
             )
-            rest_client = PaperRestClient(self.paper_engine)
-            algo_client = PaperAlgoClient(self.paper_engine, rest_client)
+            rest_client: Any = PaperRestClient(self.paper_engine)
+            algo_client: Any = PaperAlgoClient(self.paper_engine, rest_client)
         else:
             rest_client = BinanceFuturesRestClient(
                 api_key=self.config.env.binance_api_key,
@@ -244,19 +249,19 @@ class OrderFlowBotApp:
 
         direction = 1.0 if side.upper() == "BUY" else -1.0
         current_pos = self.portfolio.positions.get(self.symbol)
-        if current_pos:
-            current_pos.size += filled_qty * direction
-            current_pos.mark_price = avg_price
-        else:
-            self.portfolio.positions[self.symbol] = PositionState(
-                symbol=self.symbol,
-                size=filled_qty * direction,
-                entry_price=avg_price,
-                mark_price=avg_price,
-                unrealized_pnl=0.0,
-                leverage=3,
-                margin_type="ISOLATED",
-            )
+        new_size = (
+            (current_pos.size + filled_qty * direction) if current_pos else filled_qty * direction
+        )
+        entry_px = current_pos.entry_price if current_pos else avg_price
+        self.portfolio.positions[self.symbol] = PositionState(
+            symbol=self.symbol,
+            size=new_size,
+            entry_price=entry_px,
+            mark_price=avg_price,
+            unrealized_pnl=0.0,
+            leverage=3,
+            margin_type="ISOLATED",
+        )
 
         # Notificar a la estrategia sobre el estado de la orden
         order = self.order_manager.get_order(client_order_id)
@@ -362,7 +367,8 @@ class OrderFlowBotApp:
                 daily_dd = max(0.0, (init_bal - curr_bal) / init_bal) if init_bal > 0 else 0.0
 
                 unrealized_loss_pct = 0.0
-                for pos in self.portfolio.positions.values():
+                active_positions = self.portfolio.positions or {}
+                for pos in active_positions.values():
                     if pos.notional_usd > 0:
                         loss_pct = max(0.0, -pos.unrealized_pnl / pos.notional_usd)
                         if loss_pct > unrealized_loss_pct:
@@ -440,11 +446,13 @@ class OrderFlowBotApp:
             if hasattr(self, "paper_engine")
             else (self.portfolio.positions or {})
         )
-        active_pos_str = ", ".join(
-            f"{s}: size={p.get('positionAmt', getattr(p, 'size', 0))} entry={p.get('entryPrice', getattr(p, 'entry_price', 0))}"
-            for s, p in positions.items()
-            if abs(p.get("positionAmt", getattr(p, "size", 0))) > 1e-6
-        ) or "Ninguna"
+        active_pos_list: list[str] = []
+        for s, p in positions.items():
+            amt = float(p.get("positionAmt", 0.0)) if isinstance(p, dict) else p.size
+            ep = float(p.get("entryPrice", 0.0)) if isinstance(p, dict) else p.entry_price
+            if abs(amt) > 1e-6:
+                active_pos_list.append(f"{s}: size={amt} entry={ep}")
+        active_pos_str = ", ".join(active_pos_list) or "Ninguna"
 
         print("\n" + "=" * 70)
         print("          RESUMEN DE SESIÓN OPERATIVA - ORDERFLOW BOT")
@@ -484,8 +492,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--symbol",
-        default="BTC-USDT-PERP",
-        help="Símbolo canónico a operar (por defecto 'BTC-USDT-PERP').",
+        default="ETH-USDT-PERP",
+        help="Símbolo canónico a operar (por defecto 'ETH-USDT-PERP' para sizing óptimo en $100 USD).",
     )
     parser.add_argument(
         "--config-dir",

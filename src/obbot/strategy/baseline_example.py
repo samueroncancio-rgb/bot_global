@@ -58,10 +58,13 @@ class BaselineOrderFlowStrategy(Strategy):
         min_persistence: float = 0.50,
         min_confirming_venues: int = 2,
         require_persistence_warmup: bool = False,
+        cooldown_sec: float = 3.0,
     ) -> None:
         super().__init__(name="BaselineOrderFlow", symbol=symbol)
         self.z_threshold = z_threshold
         self.obi_threshold = obi_threshold
+        self.cooldown_sec = cooldown_sec
+        self._last_order_ts_ns: int = 0
 
         # Dimensionamiento adaptativo según símbolo (optimizado para cuenta pequeña de $100 USD)
         if trade_size is not None:
@@ -133,9 +136,7 @@ class BaselineOrderFlowStrategy(Strategy):
             return False
 
         # 2. Filtro de Consenso Multi-Exchange
-        active_venues = [
-            ex for ex, obis in features.obi_by_exchange.items() if 10 in obis
-        ]
+        active_venues = [ex for ex, obis in features.obi_by_exchange.items() if 10 in obis]
         if len(active_venues) > 1:
             req_confirming = min(self.min_confirming_venues, len(active_venues))
             if side == "BUY":
@@ -205,14 +206,17 @@ class BaselineOrderFlowStrategy(Strategy):
                 should_invalidate = False
                 exit_side: Literal["BUY", "SELL"] = "SELL" if is_long else "BUY"
 
-                if is_long and (
-                    z <= -self.invalidation_z_threshold
-                    or obi <= -self.invalidation_obi_threshold
-                ):
-                    should_invalidate = True
-                elif not is_long and (
-                    z >= self.invalidation_z_threshold
-                    or obi >= self.invalidation_obi_threshold
+                if (
+                    is_long
+                    and (
+                        z <= -self.invalidation_z_threshold
+                        or obi <= -self.invalidation_obi_threshold
+                    )
+                ) or (
+                    not is_long
+                    and (
+                        z >= self.invalidation_z_threshold or obi >= self.invalidation_obi_threshold
+                    )
                 ):
                     should_invalidate = True
 
@@ -241,15 +245,31 @@ class BaselineOrderFlowStrategy(Strategy):
         z = features.global_delta_z
         obi = features.obi_10_levels
 
+        # 1. Control de Cooldown: evitar ráfagas consecutivas de órdenes
+        if self._last_order_ts_ns > 0:
+            cooldown_ns = int(self.cooldown_sec * 1_000_000_000)
+            if (features.timestamp_ns - self._last_order_ts_ns) < cooldown_ns:
+                return []
+
+        # 2. Bloqueo de orden en vuelo (in-flight): no emitir si hay orden activa pendiente
+        has_in_flight = any(
+            o.symbol == self.symbol
+            and o.status.name
+            in ("PENDING_RISK", "AUTHORIZED", "SUBMITTED", "NEW", "PARTIALLY_FILLED")
+            for o in self._active_orders.values()
+        )
+        if has_in_flight:
+            return []
+
         # Determinar distancias de SL y TP
         if self.use_dynamic_volatility and features.realized_volatility > 0.0:
             raw_sl = features.realized_volatility * self.vol_multiplier
             # Suelo de fricción: spread + comisiones taker ida y vuelta
             friction_pct = (features.spread_bps / 10000.0) + (2.0 * self.taker_fee_rate)
-            friction_floor = friction_pct * 1.5
+            friction_floor = friction_pct * 2.0  # Suelo reforzado a 2x fricción total
 
             effective_sl = max(self.min_sl_pct, friction_floor, min(self.max_sl_pct, raw_sl))
-            effective_tp = effective_sl * 2.0
+            effective_tp = max(effective_sl * 2.0, friction_pct * 3.0)  # TP mínimo 3x fricción
         else:
             effective_sl = self.stop_loss_pct
             effective_tp = self.take_profit_pct
@@ -266,11 +286,10 @@ class BaselineOrderFlowStrategy(Strategy):
 
             stop_px = quantize(mid_px - sl_dist, self.tick_size)
             tp_px = quantize(mid_px + tp_dist, self.tick_size)
-            order_px = (
-                quantize(mid_px, self.tick_size) if self.entry_order_type == "LIMIT" else 0.0
-            )
+            order_px = quantize(mid_px, self.tick_size) if self.entry_order_type == "LIMIT" else 0.0
             tif = self.time_in_force if self.entry_order_type == "LIMIT" else "GTC"
 
+            self._last_order_ts_ns = features.timestamp_ns
             logger.info(
                 "strategy.signal_long: symbol=%s z=%.2f obi=%.2f px=%.2f sl=%.2f tp=%.2f type=%s size=%.4f",
                 self.symbol,
@@ -302,11 +321,10 @@ class BaselineOrderFlowStrategy(Strategy):
 
             stop_px = quantize(mid_px + sl_dist, self.tick_size)
             tp_px = quantize(mid_px - tp_dist, self.tick_size)
-            order_px = (
-                quantize(mid_px, self.tick_size) if self.entry_order_type == "LIMIT" else 0.0
-            )
+            order_px = quantize(mid_px, self.tick_size) if self.entry_order_type == "LIMIT" else 0.0
             tif = self.time_in_force if self.entry_order_type == "LIMIT" else "GTC"
 
+            self._last_order_ts_ns = features.timestamp_ns
             logger.info(
                 "strategy.signal_short: symbol=%s z=%.2f obi=%.2f px=%.2f sl=%.2f tp=%.2f type=%s size=%.4f",
                 self.symbol,

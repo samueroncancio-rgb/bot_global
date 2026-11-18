@@ -1,5 +1,6 @@
 """Tests unitarios para la estrategia cuantitativa de baseline optimizada."""
 
+from obbot.execution.order_manager import ManagedOrder, OrderStatus
 from obbot.features.engine import FeatureVector
 from obbot.risk.limits import PortfolioState, PositionState
 from obbot.strategy.baseline_example import BaselineOrderFlowStrategy
@@ -302,3 +303,130 @@ def test_baseline_strategy_rejects_isolated_exchange_spoofing() -> None:
 
     orders = strat.on_feature_vector(features, portfolio)
     assert len(orders) == 0, "Debe rechazar spoofing monoplataforma sin confirmación multi-exchange"
+
+
+def test_baseline_strategy_cooldown_prevents_order_bursts() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="BTCUSDT",
+        z_threshold=1.8,
+        obi_threshold=0.20,
+        cooldown_sec=3.0,
+        use_dynamic_volatility=False,
+    )
+    portfolio = PortfolioState(initial_daily_balance=100.0, current_wallet_balance=100.0)
+
+    # 1. Primera señal en t = 1,000,000,000 ns -> debe emitir orden
+    features1 = _create_test_feature_vector(
+        symbol="BTCUSDT",
+        global_delta_z=2.5,
+        obi=0.40,
+        mid_price=50000.0,
+    )
+    features1 = FeatureVector(
+        symbol="BTCUSDT",
+        timestamp_ns=1_000_000_000,
+        delta_by_exchange=features1.delta_by_exchange,
+        z_delta_by_exchange=features1.z_delta_by_exchange,
+        weights_by_exchange=features1.weights_by_exchange,
+        global_delta=features1.global_delta,
+        cvd_by_exchange=features1.cvd_by_exchange,
+        global_cvd=features1.global_cvd,
+        obi_by_exchange=features1.obi_by_exchange,
+        liquidity_persistence=features1.liquidity_persistence,
+        mid_price=features1.mid_price,
+        spread_bps=features1.spread_bps,
+        basis_bps_by_exchange=features1.basis_bps_by_exchange,
+        realized_volatility=features1.realized_volatility,
+        liquidation_intensity=features1.liquidation_intensity,
+        funding_rate=features1.funding_rate,
+        open_interest_usd=features1.open_interest_usd,
+    )
+    orders1 = strat.on_feature_vector(features1, portfolio)
+    assert len(orders1) == 1
+
+    # 2. Segunda señal solo 100ms después (t = 1,100,000,000 ns) -> debe bloquearse por Cooldown
+    features2 = FeatureVector(
+        symbol="BTCUSDT",
+        timestamp_ns=1_100_000_000,
+        delta_by_exchange=features1.delta_by_exchange,
+        z_delta_by_exchange=features1.z_delta_by_exchange,
+        weights_by_exchange=features1.weights_by_exchange,
+        global_delta=features1.global_delta,
+        cvd_by_exchange=features1.cvd_by_exchange,
+        global_cvd=features1.global_cvd,
+        obi_by_exchange=features1.obi_by_exchange,
+        liquidity_persistence=features1.liquidity_persistence,
+        mid_price=features1.mid_price,
+        spread_bps=features1.spread_bps,
+        basis_bps_by_exchange=features1.basis_bps_by_exchange,
+        realized_volatility=features1.realized_volatility,
+        liquidation_intensity=features1.liquidation_intensity,
+        funding_rate=features1.funding_rate,
+        open_interest_usd=features1.open_interest_usd,
+    )
+    orders2 = strat.on_feature_vector(features2, portfolio)
+    assert len(orders2) == 0, "Debe ser bloqueada por Cooldown activo"
+
+    # 3. Tercera señal tras 3.5 segundos (t = 4,500,000,000 ns) -> debe emitir orden
+    features3 = FeatureVector(
+        symbol="BTCUSDT",
+        timestamp_ns=4_500_000_000,
+        delta_by_exchange=features1.delta_by_exchange,
+        z_delta_by_exchange=features1.z_delta_by_exchange,
+        weights_by_exchange=features1.weights_by_exchange,
+        global_delta=features1.global_delta,
+        cvd_by_exchange=features1.cvd_by_exchange,
+        global_cvd=features1.global_cvd,
+        obi_by_exchange=features1.obi_by_exchange,
+        liquidity_persistence=features1.liquidity_persistence,
+        mid_price=features1.mid_price,
+        spread_bps=features1.spread_bps,
+        basis_bps_by_exchange=features1.basis_bps_by_exchange,
+        realized_volatility=features1.realized_volatility,
+        liquidation_intensity=features1.liquidation_intensity,
+        funding_rate=features1.funding_rate,
+        open_interest_usd=features1.open_interest_usd,
+    )
+    orders3 = strat.on_feature_vector(features3, portfolio)
+    assert len(orders3) == 1, "Debe permitir la orden tras expirar el Cooldown"
+
+
+def test_baseline_strategy_in_flight_guard_blocks_duplicate_entries() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="BTCUSDT",
+        z_threshold=1.8,
+        obi_threshold=0.20,
+        cooldown_sec=0.0,
+        use_dynamic_volatility=False,
+    )
+    portfolio = PortfolioState(initial_daily_balance=100.0, current_wallet_balance=100.0)
+
+    # Registrar una orden previa en tránsito (SUBMITTED)
+    pending_order = ManagedOrder(
+        client_order_id="OB_BTCUSDT_BUY_1",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="MARKET",
+        quantity=0.001,
+        price=0.0,
+        reduce_only=False,
+        status=OrderStatus.SUBMITTED,
+    )
+    strat.on_order_update(pending_order)
+
+    features = _create_test_feature_vector(
+        symbol="BTCUSDT",
+        global_delta_z=2.5,
+        obi=0.40,
+        mid_price=50000.0,
+    )
+
+    orders = strat.on_feature_vector(features, portfolio)
+    assert len(orders) == 0, "No debe emitir orden si ya hay una orden no terminal en vuelo"
+
+    # Cuando la orden previa pasa a FILLED o CANCELLED, se libera la guardia
+    pending_order.status = OrderStatus.CANCELLED
+    strat.on_order_update(pending_order)
+
+    orders_after = strat.on_feature_vector(features, portfolio)
+    assert len(orders_after) == 1, "Debe permitir orden una vez finalizada la orden anterior"

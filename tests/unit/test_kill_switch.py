@@ -150,4 +150,3 @@ def test_kill_switch_layer_5_manual_trigger_and_hierarchy() -> None:
     ks.reset_all("Fin de mantenimiento")
     assert not ks.is_triggered()
     assert ks.get_highest_severity_action() == KillSwitchAction.NONE
-

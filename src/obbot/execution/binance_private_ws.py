@@ -63,13 +63,19 @@ class BinancePrivateWsClient:
     async def stop(self) -> None:
         """Detiene la conexión y elimina el listenKey."""
         self._running = False
+        tasks = []
         if self._keepalive_task:
             self._keepalive_task.cancel()
+            tasks.append(self._keepalive_task)
             self._keepalive_task = None
 
         if self._ws_task:
             self._ws_task.cancel()
+            tasks.append(self._ws_task)
             self._ws_task = None
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         if self._listen_key:
             try:
@@ -115,10 +121,13 @@ class BinancePrivateWsClient:
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
                     logger.info("binance_private_ws.connected")
-                    while self._running:
-                        msg_raw = await ws.recv()
+                    while self._running and self._listen_key is not None:
+                        try:
+                            msg_raw = await ws.recv()
+                        except websockets.ConnectionClosed:
+                            break
                         msg = json.loads(msg_raw)
-                        await self._handle_message(msg)
+                        await self._handle_message(msg, ws)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -126,7 +135,7 @@ class BinancePrivateWsClient:
                     logger.warning("binance_private_ws.disconnected: %s. Reintentando...", exc)
                     await asyncio.sleep(2.0)
 
-    async def _handle_message(self, msg: dict[str, Any]) -> None:
+    async def _handle_message(self, msg: dict[str, Any], ws: Any = None) -> None:
         """Despacha los eventos del User Data Stream a los callbacks registrados."""
         event_type = msg.get("e")
         if event_type == "ORDER_TRADE_UPDATE":
@@ -138,5 +147,7 @@ class BinancePrivateWsClient:
             if self.on_account_update:
                 await self.on_account_update(account_data)
         elif event_type == "listenKeyExpired":
-            logger.error("binance_private_ws.listen_key_expired. Recreando clave...")
+            logger.error("binance_private_ws.listen_key_expired: forzando reconexión...")
             self._listen_key = None
+            if ws is not None:
+                await ws.close()

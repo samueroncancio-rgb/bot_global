@@ -73,17 +73,18 @@ class PaperExecutionEngine:
         self._order_id_counter = 1000
         self._algo_id_counter = 5000
         self._latest_mark_prices: dict[str, float] = {}
+        self._active_tasks: set[asyncio.Task[Any]] = set()
 
-    def _notify_fill(
-        self, client_order_id: str, quantity: float, price: float, side: str
-    ) -> None:
+    def _notify_fill(self, client_order_id: str, quantity: float, price: float, side: str) -> None:
         """Notifica el fill a listeners asíncronos si están registrados."""
         if self.on_fill_callback:
             try:
                 loop = asyncio.get_running_loop()
                 coro = self.on_fill_callback(client_order_id, quantity, price, side)
                 if asyncio.iscoroutine(coro):
-                    loop.create_task(coro)
+                    task = loop.create_task(coro)
+                    self._active_tasks.add(task)
+                    task.add_done_callback(self._active_tasks.discard)
             except RuntimeError:
                 pass
 
@@ -284,7 +285,9 @@ class PaperExecutionEngine:
             order.filled_qty = order.quantity
             order.avg_price = px
             is_taker = order.order_type == "MARKET"
-            self._execute_fill(order.symbol, order.side, order.quantity, px, order.reduce_only, is_taker=is_taker)
+            self._execute_fill(
+                order.symbol, order.side, order.quantity, px, order.reduce_only, is_taker=is_taker
+            )
             self._notify_fill(order.client_order_id, order.quantity, px, order.side)
 
     async def cancel_order(

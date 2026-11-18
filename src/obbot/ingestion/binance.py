@@ -151,6 +151,13 @@ class BinanceAdapter(BaseExchangeAdapter):
             await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
 
+        # Cancelar y esperar tareas en segundo plano (snapshot downloads)
+        for task in list(self._background_tasks):
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
+
         if self._session:
             await self._session.close()
             self._session = None

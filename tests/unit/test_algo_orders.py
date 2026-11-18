@@ -62,4 +62,3 @@ async def test_algo_orders_query_open_algo_orders() -> None:
         params={"symbol": "BTCUSDT"},
         signed=True,
     )
-

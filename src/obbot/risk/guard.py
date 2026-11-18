@@ -168,6 +168,15 @@ class RiskGuard:
                         f"(SL: {order.stop_loss_price}, Entrada: {effective_price})"
                     ),
                 )
+            loss_pct = abs(effective_price - order.stop_loss_price) / effective_price
+            if loss_pct > (self.limits.max_trade_loss_pct + 1e-6):
+                return RiskDecision(
+                    approved=False,
+                    reason=(
+                        f"Pérdida potencial por Stop-Loss ({loss_pct * 100:.2f}%) excede "
+                        f"el límite máximo permitido ({self.limits.max_trade_loss_pct * 100:.2f}%)"
+                    ),
+                )
 
         # Registro para rate-limiting
         self._order_timestamps_ns.append(current_ts_ns)

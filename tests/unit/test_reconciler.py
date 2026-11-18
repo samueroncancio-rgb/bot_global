@@ -70,3 +70,66 @@ async def test_reconciler_synchronizes_closed_orders_and_positions() -> None:
     assert portfolio.positions is not None
     assert "BTCUSDT" in portfolio.positions
 
+
+@pytest.mark.asyncio
+async def test_reconciler_detects_orphan_orders_on_exchange() -> None:
+    rest_mock = AsyncMock(spec=BinanceFuturesRestClient)
+    algo_mock = AsyncMock(spec=BinanceAlgoOrderClient)
+    guard = RiskGuard()
+    manager = OrderManager(rest_mock, algo_mock, guard)
+    reconciler = StateReconciler(rest_mock, algo_mock, manager)
+
+    # Binance tiene una orden remota con clientOrderId que la memoria local no conoce
+    rest_mock.get_open_orders.return_value = [
+        {
+            "orderId": 999111,
+            "clientOrderId": "UNKNOWN_ORPHAN_ORDER_001",
+            "symbol": "BTCUSDT",
+            "origQty": "0.05",
+            "status": "NEW",
+        }
+    ]
+    algo_mock.get_open_algo_orders.return_value = []
+
+    report = await reconciler.reconcile_orders()
+    assert report["remote_open_regular"] == 1
+    assert any("UNKNOWN_ORPHAN_ORDER_001" in d for d in report["discrepancies"])
+
+
+@pytest.mark.asyncio
+async def test_reconciler_audits_algo_stop_loss_on_positions() -> None:
+    rest_mock = AsyncMock(spec=BinanceFuturesRestClient)
+    algo_mock = AsyncMock(spec=BinanceAlgoOrderClient)
+    guard = RiskGuard()
+    manager = OrderManager(rest_mock, algo_mock, guard)
+    reconciler = StateReconciler(rest_mock, algo_mock, manager)
+
+    rest_mock.get_positions.return_value = [
+        {
+            "symbol": "ETHUSDT",
+            "positionAmt": "0.10",  # LONG position
+            "entryPrice": "2600.0",
+            "markPrice": "2610.0",
+            "unRealizedProfit": "1.0",
+            "leverage": "3",
+            "marginType": "isolated",
+        }
+    ]
+
+    # Caso 1: Sin Algo SL -> debe loguear aviso crítico pero reconciliar la posición
+    algo_mock.get_open_algo_orders.return_value = []
+    portfolio = PortfolioState(initial_daily_balance=100.0, current_wallet_balance=100.0)
+    pos_unprotected = await reconciler.reconcile_positions(portfolio)
+    assert len(pos_unprotected) == 1
+
+    # Caso 2: Con Algo SL opuesto (SELL STOP_MARKET) -> posición protegida
+    algo_mock.get_open_algo_orders.return_value = [
+        {
+            "symbol": "ETHUSDT",
+            "side": "SELL",
+            "algoType": "STOP_MARKET",
+            "triggerPrice": "2580.0",
+        }
+    ]
+    pos_protected = await reconciler.reconcile_positions(portfolio)
+    assert len(pos_protected) == 1

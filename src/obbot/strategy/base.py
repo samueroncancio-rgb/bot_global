@@ -30,4 +30,3 @@ class Strategy(ABC):
     def on_order_update(self, order: ManagedOrder) -> None:
         """Notificación de actualización en el estado de una orden gestionada."""
         ...
-

@@ -107,4 +107,3 @@ def test_feature_engine_integration() -> None:
 
     # Comprobar Basis: OKX mid es 50007.0 vs Binance mid 50005.0 (+2 USD)
     assert fv.basis_bps_by_exchange["okx"] > 0.0
-

@@ -16,8 +16,8 @@ class RiskLimits:
 
     max_order_notional_usd: float = 2000.0
     max_position_notional_usd: float = 10000.0
-    max_daily_drawdown_pct: float = 0.03  # 3% del balance inicial del día
-    max_trade_loss_pct: float = 0.01  # 1% por operación
+    max_daily_drawdown_pct: float = 0.05  # 5% del balance inicial del día (según risk.yaml)
+    max_trade_loss_pct: float = 0.02  # 2% por operación (según risk.yaml)
     fat_finger_price_deviation_pct: float = 0.02  # 2% máximo respecto al mark price
     max_orders_per_minute: int = 60
 

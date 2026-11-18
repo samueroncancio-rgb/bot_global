@@ -211,3 +211,24 @@ def test_risk_guard_blocks_on_kill_switch_active() -> None:
     decision_exit = guard.evaluate_order(exit_order, portfolio, 50000.0, now_ns)
     assert decision_exit.approved
 
+
+def test_risk_guard_rejects_excessive_stop_loss_distance() -> None:
+    limits = RiskLimits(max_order_notional_usd=2000.0, max_trade_loss_pct=0.02)
+    guard = RiskGuard(limits)
+    portfolio = _build_test_portfolio()
+    now_ns = 1_000_000_000
+
+    # Stop Loss a 46,000 con entrada a 50,000 representa 8% de pérdida (límite es 2%)
+    order = OrderRequest(
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="LIMIT",
+        quantity=0.01,
+        price=50000.0,
+        stop_loss_price=46000.0,
+    )
+
+    decision = guard.evaluate_order(order, portfolio, 50000.0, now_ns)
+    assert not decision.approved
+    assert "Pérdida potencial por Stop-Loss" in decision.reason
+    assert "excede el límite máximo permitido" in decision.reason

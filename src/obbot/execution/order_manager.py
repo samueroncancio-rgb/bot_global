@@ -317,3 +317,7 @@ class OrderManager:
     def get_order(self, client_order_id: str) -> ManagedOrder | None:
         """Obtiene una orden gestionada por su clientOrderId."""
         return self._orders.get(client_order_id)
+
+    def get_tracked_orders(self) -> dict[str, ManagedOrder]:
+        """Retorna una copia superficial de las órdenes gestionadas."""
+        return dict(self._orders)

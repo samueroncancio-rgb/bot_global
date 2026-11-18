@@ -21,4 +21,3 @@ def test_cvd_accumulation_and_reset() -> None:
     tracker.reset()
     assert tracker.get_global_cvd() == 0.0
     assert tracker.get_cvd("binance") == 0.0
-
