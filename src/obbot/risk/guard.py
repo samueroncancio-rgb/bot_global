@@ -105,8 +105,8 @@ class RiskGuard:
             )
 
         # 5. Límite nocional de posición agregada
-        if not order.reduce_only and portfolio.positions:
-            pos = portfolio.positions.get(order.symbol)
+        if not order.reduce_only and portfolio:
+            pos = portfolio.get_position(order.symbol)
             current_size = pos.size if pos else 0.0
             # Si la orden suma a la posición existente
             is_increasing = (current_size >= 0.0 and order.side == "BUY") or (

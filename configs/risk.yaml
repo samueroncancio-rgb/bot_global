@@ -12,6 +12,7 @@ risk:
     max_daily_drawdown_pct: 0.05     # 5% del balance inicial del día ($5.00 USD para $100)
     max_trade_loss_pct: 0.02         # 2% de stop loss por operación ($2.00 USD)
     fat_finger_price_deviation_pct: 0.02 # Rechaza órdenes a más del 2% del mark price
+    max_orders_per_minute: 5
 
   latency:
     baseline_ping_samples: 10

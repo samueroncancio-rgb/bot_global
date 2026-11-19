@@ -7,7 +7,7 @@ symbols:
     tick_size: "0.10"
     step_size: "0.001"
     min_qty: "0.001"
-    min_notional_usd: "5.0"
+    min_notional_usd: "20.0"
     exchange_mapping:
       binance: "BTCUSDT"
       okx: "BTC-USDT-SWAP"
@@ -32,7 +32,7 @@ symbols:
     tick_size: "0.01"
     step_size: "0.01"
     min_qty: "0.01"
-    min_notional_usd: "5.0"
+    min_notional_usd: "20.0"
     exchange_mapping:
       binance: "ETHUSDT"
       okx: "ETH-USDT-SWAP"

@@ -35,7 +35,8 @@ async def test_algo_orders_stop_loss_creation() -> None:
         params={
             "symbol": "BTCUSDT",
             "side": "SELL",
-            "algoType": "STOP_MARKET",
+            "algoType": "CONDITIONAL",
+            "type": "STOP_MARKET",
             "triggerPrice": 49000.0,
             "closePosition": "true",
             "clientAlgoId": "SL_TEST_01",

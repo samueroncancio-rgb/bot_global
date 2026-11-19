@@ -36,7 +36,7 @@ async def test_order_manager_successful_order_lifecycle() -> None:
 
     assert order.status == OrderStatus.NEW
     assert order.exchange_order_id == 9999
-    assert order.client_order_id.startswith("OB_BTCUSDT_BUY_")
+    assert order.client_order_id.startswith("O_BTCUSDT_B_")
     rest_mock.create_order.assert_awaited_once()
 
 
@@ -103,7 +103,8 @@ async def test_order_manager_atomic_stop_loss_attachment_on_fill() -> None:
         symbol="BTCUSDT",
         side="SELL",
         trigger_price=49000.0,
-        close_position=True,
+        quantity=0.01,
+        close_position=False,
         client_algo_id=f"SL_{order.client_order_id}",
     )
 

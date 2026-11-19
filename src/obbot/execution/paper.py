@@ -562,6 +562,33 @@ class PaperRestClient(BinanceFuturesRestClient):
     async def get_positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
         return await self.engine.get_positions(symbol=symbol)
 
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str = "15m",
+        limit: int = 50,
+    ) -> list[list[Any]]:
+        px = self.engine._latest_mark_prices.get(symbol, 1800.0)
+        now_ms = self.engine.clock.now_ns() // 1_000_000
+        step_ms = 15 * 60 * 1000
+        return [
+            [
+                now_ms - (limit - i) * step_ms,
+                str(px),
+                str(px * 1.001),
+                str(px * 0.999),
+                str(px),
+                "100.0",
+                now_ms - (limit - i - 1) * step_ms,
+                "100000.0",
+                100,
+                "50.0",
+                "50000.0",
+                "0",
+            ]
+            for i in range(limit)
+        ]
+
     async def close(self) -> None:
         pass
 

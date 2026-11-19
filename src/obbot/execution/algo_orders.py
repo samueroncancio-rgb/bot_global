@@ -19,6 +19,11 @@ class BinanceAlgoOrderClient:
     def __init__(self, rest_client: BinanceFuturesRestClient) -> None:
         self.rest_client = rest_client
 
+    @staticmethod
+    def format_symbol(symbol: str) -> str:
+        """Normaliza un símbolo canónico ('ETH-USDT-PERP') o nativo al formato de Binance ('ETHUSDT')."""
+        return symbol.replace("-PERP", "").replace("-", "").upper()
+
     async def create_algo_order(
         self,
         symbol: str,
@@ -32,9 +37,10 @@ class BinanceAlgoOrderClient:
     ) -> dict[str, Any]:
         """Crea una orden condicional Algo Order."""
         params: dict[str, Any] = {
-            "symbol": symbol.upper(),
+            "symbol": self.format_symbol(symbol),
             "side": side.upper(),
-            "algoType": algo_type.upper(),
+            "algoType": "CONDITIONAL",
+            "type": algo_type.upper(),
             "triggerPrice": trigger_price,
         }
 
@@ -119,7 +125,7 @@ class BinanceAlgoOrderClient:
         client_algo_id: str | None = None,
     ) -> dict[str, Any]:
         """Cancela una Algo Order abierta (/fapi/v1/algoOrder)."""
-        params: dict[str, Any] = {"symbol": symbol.upper()}
+        params: dict[str, Any] = {"symbol": self.format_symbol(symbol)}
         if algo_id is not None:
             params["algoId"] = algo_id
         elif client_algo_id is not None:
@@ -138,7 +144,7 @@ class BinanceAlgoOrderClient:
         client_algo_id: str | None = None,
     ) -> dict[str, Any]:
         """Consulta el estado de una orden condicional (/fapi/v1/algoOrder)."""
-        params: dict[str, Any] = {"symbol": symbol.upper()}
+        params: dict[str, Any] = {"symbol": self.format_symbol(symbol)}
         if algo_id is not None:
             params["algoId"] = algo_id
         elif client_algo_id is not None:
@@ -157,7 +163,7 @@ class BinanceAlgoOrderClient:
         """
         params: dict[str, Any] = {}
         if symbol:
-            params["symbol"] = symbol.upper()
+            params["symbol"] = self.format_symbol(symbol)
         res = await self.rest_client.request(
             "GET", "/fapi/v1/openAlgoOrders", params=params, signed=True
         )

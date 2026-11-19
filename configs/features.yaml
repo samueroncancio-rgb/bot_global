@@ -1,5 +1,5 @@
 features:
-  sampling_interval_ms: 100
+  sampling_interval_ms: 400
 
   delta:
     rolling_windows_sec: [60, 300, 900]

@@ -56,10 +56,28 @@ class PortfolioState:
     current_wallet_balance: float
     realized_daily_pnl: float = 0.0
     positions: dict[str, PositionState] | None = None
+    exchange_custody_balance: float = 0.0
 
     def __post_init__(self) -> None:
         if self.positions is None:
             self.positions = {}
+
+    def get_position(self, symbol: str) -> PositionState | None:
+        """Obtiene la posición para un símbolo admitiendo formato canónico o nativo."""
+        if not self.positions:
+            return None
+        if symbol in self.positions:
+            return self.positions[symbol]
+        clean_target = symbol.replace("-PERP", "").replace("-", "").upper()
+        for k, v in self.positions.items():
+            if k.replace("-PERP", "").replace("-", "").upper() == clean_target:
+                return v
+        return None
+
+    def has_open_position(self, symbol: str) -> bool:
+        """Indica si existe una posición activa con tamaño distinto de cero."""
+        pos = self.get_position(symbol)
+        return pos is not None and abs(pos.size) > 1e-6
 
     @property
     def total_unrealized_pnl(self) -> float:

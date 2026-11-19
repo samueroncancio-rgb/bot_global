@@ -157,6 +157,11 @@ class BinanceFuturesRestClient:
 
     # --- Endpoints de Órdenes Regulares (Maker / Taker) ---
 
+    @staticmethod
+    def format_symbol(symbol: str) -> str:
+        """Normaliza un símbolo canónico ('ETH-USDT-PERP') o nativo al formato de Binance ('ETHUSDT')."""
+        return symbol.replace("-PERP", "").replace("-", "").upper()
+
     async def create_order(
         self,
         symbol: str,
@@ -178,7 +183,7 @@ class BinanceFuturesRestClient:
             )
 
         params: dict[str, Any] = {
-            "symbol": symbol.upper(),
+            "symbol": self.format_symbol(symbol),
             "side": side.upper(),
             "type": order_type.upper(),
             "quantity": quantity,
@@ -207,7 +212,7 @@ class BinanceFuturesRestClient:
         orig_client_order_id: str | None = None,
     ) -> dict[str, Any]:
         """Cancela una orden abierta (/fapi/v1/order)."""
-        params: dict[str, Any] = {"symbol": symbol.upper()}
+        params: dict[str, Any] = {"symbol": self.format_symbol(symbol)}
         if order_id is not None:
             params["orderId"] = order_id
         elif orig_client_order_id is not None:
@@ -224,7 +229,7 @@ class BinanceFuturesRestClient:
         orig_client_order_id: str | None = None,
     ) -> dict[str, Any]:
         """Consulta el estado de una orden regular (/fapi/v1/order)."""
-        params: dict[str, Any] = {"symbol": symbol.upper()}
+        params: dict[str, Any] = {"symbol": self.format_symbol(symbol)}
         if order_id is not None:
             params["orderId"] = order_id
         elif orig_client_order_id is not None:
@@ -238,21 +243,36 @@ class BinanceFuturesRestClient:
         """Obtiene la lista de órdenes regulares abiertas (/fapi/v1/openOrders)."""
         params: dict[str, Any] = {}
         if symbol:
-            params["symbol"] = symbol.upper()
+            params["symbol"] = self.format_symbol(symbol)
         res = await self.request("GET", "/fapi/v1/openOrders", params=params, signed=True)
         return res if isinstance(res, list) else []
 
     async def get_positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
-        """Obtiene el riesgo de posiciones abiertas (/fapi/v1/positionRisk)."""
+        """Obtiene el riesgo de posiciones abiertas (/fapi/v2/positionRisk)."""
         params: dict[str, Any] = {}
         if symbol:
-            params["symbol"] = symbol.upper()
-        res = await self.request("GET", "/fapi/v1/positionRisk", params=params, signed=True)
+            params["symbol"] = self.format_symbol(symbol)
+        res = await self.request("GET", "/fapi/v2/positionRisk", params=params, signed=True)
         return res if isinstance(res, list) else []
 
     async def get_account(self) -> dict[str, Any]:
         """Obtiene la información de cuenta y balance (/fapi/v2/account)."""
         return await self.request("GET", "/fapi/v2/account", signed=True)
+
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str = "15m",
+        limit: int = 50,
+    ) -> list[list[Any]]:
+        """Obtiene velas klines históricas de Binance (/fapi/v1/klines)."""
+        params: dict[str, Any] = {
+            "symbol": self.format_symbol(symbol),
+            "interval": interval,
+            "limit": limit,
+        }
+        res = await self.request("GET", "/fapi/v1/klines", params=params, signed=False)
+        return res if isinstance(res, list) else []
 
     # --- Gestión del User Data Stream ListenKey ---
 

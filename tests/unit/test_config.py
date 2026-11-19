@@ -29,7 +29,7 @@ def test_load_all_yaml_configs() -> None:
     assert config.risk["risk"]["limits"]["max_order_notional_usd"] > 0
 
     # Verificar features
-    assert config.features["features"]["sampling_interval_ms"] == 100
+    assert config.features["features"]["sampling_interval_ms"] == 400
     assert config.features["features"]["obi"]["levels"] == [5, 10, 20]
 
 

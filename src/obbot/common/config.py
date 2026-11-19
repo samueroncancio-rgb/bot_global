@@ -47,10 +47,15 @@ class EnvSettings(BaseSettings):
     health_port: int = Field(default=8080)
 
     llm_provider: str = Field(default="gemini")
-    llm_model: str = Field(default="gemini-2.5-flash")
+    llm_model: str = Field(default="gemini-3.8-flash")
     gemini_api_key: str = Field(default="")
     llm_base_url: str = Field(default="")
     llm_api_key: str = Field(default="")
+
+    telegram_enabled: bool = Field(default=False)
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id: str = Field(default="")
+    telegram_allowed_user_ids: str = Field(default="")
 
 
 def load_yaml(file_path: Path | str) -> dict[str, Any]:

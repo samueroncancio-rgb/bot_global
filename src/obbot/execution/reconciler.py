@@ -34,6 +34,22 @@ class StateReconciler:
         self.order_manager = order_manager
         self.clock = clock or SystemClock()
 
+    async def reconcile_balance(self, portfolio: PortfolioState) -> float:
+        """
+        Consulta y sincroniza el saldo de custodia real de Binance Futures.
+        Mantiene el balance asignado de $100 intacto como base de la estrategia y riesgo.
+        """
+        try:
+            acc = await self.rest_client.get_account()
+            wallet_bal = float(acc.get("totalWalletBalance", 0.0))
+            if wallet_bal > 0.0:
+                portfolio.exchange_custody_balance = wallet_bal
+                logger.info("reconciler.custody_balance_synced: exchange_wallet=%.2f", wallet_bal)
+                return wallet_bal
+        except Exception as exc:
+            logger.warning("reconciler.fetch_balance_failed: %s", exc)
+        return portfolio.exchange_custody_balance
+
     async def reconcile_orders(self) -> dict[str, Any]:
         """
         Reconcilia órdenes regulares y condicionales abiertas.
@@ -136,6 +152,7 @@ class StateReconciler:
             leverage = int(p.get("leverage", 1))
             margin_type = p.get("marginType", "isolated").upper()
 
+            clean_sym = symbol.replace("-PERP", "").replace("-", "").upper()
             pos = PositionState(
                 symbol=symbol,
                 size=size,
@@ -148,14 +165,20 @@ class StateReconciler:
             updated_positions.append(pos)
             if portfolio.positions is not None:
                 portfolio.positions[symbol] = pos
+                if "ETH" in clean_sym:
+                    portfolio.positions["ETH-USDT-PERP"] = pos
+                elif "BTC" in clean_sym:
+                    portfolio.positions["BTC-USDT-PERP"] = pos
 
             # Auditoría: Comprobar que la posición cuente con Algo Stop-Loss activo
             expected_sl_side = "SELL" if size > 0 else "BUY"
             has_algo_sl = any(
-                str(algo_o.get("symbol", "")).upper() == symbol.upper()
+                str(algo_o.get("symbol", "")).replace("-PERP", "").replace("-", "").upper() == clean_sym
                 and str(algo_o.get("side", "")).upper() == expected_sl_side
-                and str(algo_o.get("algoType", algo_o.get("orderType", ""))).upper()
-                in ("STOP_MARKET", "STOP")
+                and (
+                    str(algo_o.get("orderType", "")).upper() in ("STOP_MARKET", "STOP")
+                    or str(algo_o.get("algoType", "")).upper() in ("STOP_MARKET", "STOP")
+                )
                 for algo_o in remote_algo_orders
             )
             if not has_algo_sl:
@@ -165,13 +188,36 @@ class StateReconciler:
                     size,
                 )
 
-        # Actualizar posiciones en portfolio
+        # Actualizar posiciones en portfolio y limpiar cerradas
         if portfolio.positions is not None:
-            active_symbols = {p.symbol for p in updated_positions}
-            # Limpiar posiciones que ya estén cerradas en el exchange
-            closed_symbols = [s for s in portfolio.positions if s not in active_symbols]
+            active_clean = {
+                p.symbol.replace("-PERP", "").replace("-", "").upper() for p in updated_positions
+            }
+            closed_symbols = [
+                s
+                for s in list(portfolio.positions.keys())
+                if s.replace("-PERP", "").replace("-", "").upper() not in active_clean
+            ]
             for s in closed_symbols:
-                del portfolio.positions[s]
+                portfolio.positions.pop(s, None)
+
+            # Cancelar Algo Orders huérfanas en el exchange si la posición asociada ya se cerró
+            for algo_o in remote_algo_orders:
+                algo_sym = (
+                    str(algo_o.get("symbol", "")).replace("-PERP", "").replace("-", "").upper()
+                )
+                if algo_sym not in active_clean:
+                    aid = algo_o.get("algoId")
+                    if aid:
+                        try:
+                            await self.algo_client.cancel_algo_order(algo_sym, algo_id=aid)
+                            logger.info(
+                                "reconciler.cancelled_orphan_algo_order: symbol=%s algoId=%s",
+                                algo_sym,
+                                aid,
+                            )
+                        except Exception as exc:
+                            logger.warning("reconciler.cancel_orphan_algo_failed: %s", exc)
 
         logger.info(
             "reconciler.positions_synced: active_positions=%d",
@@ -188,6 +234,7 @@ class StateReconciler:
         while True:
             try:
                 await asyncio.sleep(interval_sec)
+                await self.reconcile_balance(portfolio)
                 await self.reconcile_orders()
                 await self.reconcile_positions(portfolio)
             except asyncio.CancelledError:

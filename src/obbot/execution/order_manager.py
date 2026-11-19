@@ -82,10 +82,12 @@ class OrderManager:
         self._stop_watchdogs: dict[str, asyncio.Task[None]] = {}
 
     def _generate_client_order_id(self, symbol: str, side: str) -> str:
-        """Genera un clientOrderId determinista y trazable."""
+        """Genera un clientOrderId determinista y trazable (máximo 36 caracteres para Binance)."""
         self._sequence_counter += 1
+        clean_symbol = symbol.replace("-PERP", "").replace("-", "")[:8]
+        side_code = "B" if side.upper() == "BUY" else "S"
         ts_ms = int(time.time() * 1000)
-        return f"OB_{symbol}_{side}_{ts_ms}_{self._sequence_counter:04d}"
+        return f"O_{clean_symbol}_{side_code}_{ts_ms}_{self._sequence_counter:04d}"
 
     async def submit_order(
         self,
@@ -173,6 +175,11 @@ class OrderManager:
             managed.status = OrderStatus.REJECTED
             managed.reject_reason = f"Error Binance [{exc.code}]: {exc.message}"
             managed.updated_at_ns = self.clock.now_ns()
+            logger.error(
+                "order_manager.order_rejected_by_binance: %s - %s",
+                client_order_id,
+                managed.reject_reason,
+            )
             return managed
 
         except Exception as exc:
@@ -249,7 +256,8 @@ class OrderManager:
                     symbol=order.symbol,
                     side=exit_side,
                     trigger_price=order.stop_loss_price,  # type: ignore[arg-type]
-                    close_position=True,
+                    quantity=order.filled_quantity or order.quantity,
+                    close_position=False,
                     client_algo_id=client_algo_id,
                 )
                 order.algo_stop_id = res.get("algoId")

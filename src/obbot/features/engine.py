@@ -16,6 +16,7 @@ from obbot.common.events import (
 from obbot.common.logging import get_logger
 from obbot.features.cvd import CVDTracker
 from obbot.features.delta import ExchangeDeltaTracker
+from obbot.features.htf import HTFTrendTracker
 from obbot.features.liquidations import LiquidationTracker
 from obbot.features.obi import OBICalculator
 from obbot.features.weights import DynamicWeightCalculator
@@ -50,6 +51,9 @@ class FeatureVector:
     liquidation_intensity: float
     funding_rate: float
     open_interest_usd: float
+    # Tendencia de marco temporal superior (HTF)
+    htf_ema_15m: float = 0.0
+    htf_trend_regime: str = "NEUTRAL"
 
     @property
     def global_delta_z(self) -> float:
@@ -94,6 +98,7 @@ class FeatureEngine:
         }
         self.liq_tracker = LiquidationTracker(symbol)
         self.books: dict[str, OrderBookL2] = {ex: OrderBookL2(ex, symbol) for ex in self.exchanges}
+        self.htf_tracker = HTFTrendTracker()
 
         # Volatilidad realizada sobre retornos de trades recientes
         self._price_history: deque[tuple[int, float]] = deque(maxlen=200)
@@ -123,6 +128,9 @@ class FeatureEngine:
 
         # 4. Historial de precios para volatilidad realizada
         self._price_history.append((trade.ts_recv_ns, trade.price))
+
+        # 5. Tracking de tendencia superior (HTF)
+        self.htf_tracker.on_price_update(trade.price, trade.ts_recv_ns)
 
     def on_book_snapshot(self, snapshot: BookSnapshotEvent) -> None:
         """Actualiza el libro L2 y el cálculo de OBI tras un snapshot."""
@@ -235,6 +243,10 @@ class FeatureEngine:
         liq_metrics = self.liq_tracker.get_metrics(now_ns)
         realized_vol = self._compute_realized_volatility()
 
+        # 6. Tendencia y régimen HTF
+        htf_ema = self.htf_tracker.get_ema()
+        htf_regime = self.htf_tracker.compute_regime(mid_val, self.cvd_tracker.get_global_cvd())
+
         return FeatureVector(
             symbol=self.symbol,
             timestamp_ns=now_ns,
@@ -253,4 +265,6 @@ class FeatureEngine:
             liquidation_intensity=liq_metrics.events_per_minute,
             funding_rate=self._latest_funding_rate,
             open_interest_usd=self._latest_oi_usd,
+            htf_ema_15m=htf_ema,
+            htf_trend_regime=htf_regime,
         )

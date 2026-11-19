@@ -1,5 +1,6 @@
 """Estrategia baseline de ejemplo basada en confluencia de Delta Global y OBI."""
 
+import math
 from typing import Literal
 
 from obbot.common.logging import get_logger
@@ -40,37 +41,43 @@ class BaselineOrderFlowStrategy(Strategy):
         z_threshold: float = 1.8,
         obi_threshold: float = 0.20,
         trade_size: float | None = None,
-        stop_loss_pct: float = 0.0020,  # 20 bps (0.20%)
-        take_profit_pct: float = 0.0040,  # 40 bps (0.40% ratio riesgo/beneficio 1:2)
+        stop_loss_pct: float = 0.0050,  # 50 bps (0.50% horizonte swing intradía)
+        take_profit_pct: float = 0.0120,  # 120 bps (1.20% ratio R/B nominal 1:2.4)
         tick_size: float | None = None,
         entry_order_type: str = "MARKET",
         time_in_force: str = "GTC",
         use_dynamic_volatility: bool = True,
         vol_multiplier: float = 1.5,
-        min_sl_pct: float = 0.0015,  # 15 bps
-        max_sl_pct: float = 0.0060,  # 60 bps
+        min_sl_pct: float = 0.0035,  # 35 bps suelo de seguridad
+        max_sl_pct: float = 0.0100,  # 100 bps
         min_ticks_sl: int = 4,
         taker_fee_rate: float = 0.0005,  # 5 bps
-        enable_flow_invalidation: bool = True,
+        enable_flow_invalidation: bool = False,
         invalidation_z_threshold: float = 1.0,
         invalidation_obi_threshold: float = 0.25,
         enable_anti_spoofing: bool = True,
+        enable_htf_filter: bool = True,
         min_persistence: float = 0.50,
         min_confirming_venues: int = 2,
         require_persistence_warmup: bool = False,
         cooldown_sec: float = 3.0,
+        post_close_cooldown_sec: float = 120.0,
     ) -> None:
         super().__init__(name="BaselineOrderFlow", symbol=symbol)
         self.z_threshold = z_threshold
         self.obi_threshold = obi_threshold
         self.cooldown_sec = cooldown_sec
+        self.post_close_cooldown_sec = post_close_cooldown_sec
+        self.enable_htf_filter = enable_htf_filter
         self._last_order_ts_ns: int = 0
+        self._last_position_closed_ts_ns: int = 0
+        self._prev_position_size: float = 0.0
 
         # Dimensionamiento adaptativo según símbolo (optimizado para cuenta pequeña de $100 USD)
         if trade_size is not None:
             self.trade_size = trade_size
         elif "ETH" in symbol.upper():
-            self.trade_size = 0.01  # 0.01 ETH (~$26 USD nocional, margen a 3x ~$8.67 USD)
+            self.trade_size = 0.02  # 0.02 ETH (~$35.50 USD nocional, margen a 3x ~$11.83 USD, supera mínimo de $20 de Binance)
         else:
             self.trade_size = 0.001  # 0.001 BTC (~$64 USD nocional, margen a 3x ~$21.33 USD)
 
@@ -100,6 +107,27 @@ class BaselineOrderFlowStrategy(Strategy):
         self.min_confirming_venues = min_confirming_venues
         self.require_persistence_warmup = require_persistence_warmup
         self._active_orders: dict[str, ManagedOrder] = {}
+
+    def get_trade_size(self, mid_price: float) -> float:
+        """
+        Calcula el tamaño de la orden garantizando que supere el nocional mínimo de Binance ($20.00 USD)
+        y se mantenga adecuado para una cuenta de $100 USD (apalancamiento 3x = margen ~$11-$12 USD).
+        """
+        if self.trade_size is not None:
+            size = self.trade_size
+        elif "ETH" in self.symbol.upper():
+            size = 0.02
+        else:
+            size = 0.001
+
+        # Salvaguarda Binance MIN_NOTIONAL: mínimo $22.00 USD nocional
+        min_notional_usd = 22.0
+        if mid_price > 0.0:
+            notional = size * mid_price
+            if notional < min_notional_usd:
+                step = 0.001 if ("ETH" in self.symbol.upper() or "BTC" in self.symbol.upper()) else 0.01
+                size = round(math.ceil((min_notional_usd / mid_price) / step) * step, 4)
+        return size
 
     def _validate_anti_spoofing(self, side: str, features: FeatureVector) -> bool:
         """
@@ -193,10 +221,19 @@ class BaselineOrderFlowStrategy(Strategy):
         if features.symbol != self.symbol or features.mid_price <= 0.0:
             return []
 
-        current_pos = portfolio.positions.get(self.symbol) if portfolio.positions else None
+        current_pos = portfolio.get_position(self.symbol) if portfolio else None
         current_size = current_pos.size if current_pos else 0.0
 
-        # Si ya existe una posición abierta, evaluar invalidación temprana de flujo (Early Exit)
+        # Detección de transición de cierre de posición para activar cooldown post-trade
+        if abs(self._prev_position_size) > 1e-6 and abs(current_size) <= 1e-6:
+            self._last_position_closed_ts_ns = features.timestamp_ns
+            logger.info(
+                "strategy.position_closed_cooldown_started: durmiendo %.0fs tras cierre de posicion",
+                self.post_close_cooldown_sec,
+            )
+        self._prev_position_size = current_size
+
+        # SINGLE-POSITION LOCK: Si ya existe una posición abierta, NO emitir nuevas entradas
         if abs(current_size) > 1e-6:
             if self.enable_flow_invalidation:
                 is_long = current_size > 0
@@ -241,6 +278,12 @@ class BaselineOrderFlowStrategy(Strategy):
                     ]
             return []
 
+        # Cooldown post-cierre de posición (evitar re-entradas inmediatas y sobre-operación / whipsaw)
+        if self._last_position_closed_ts_ns > 0:
+            post_close_ns = int(self.post_close_cooldown_sec * 1_000_000_000)
+            if (features.timestamp_ns - self._last_position_closed_ts_ns) < post_close_ns:
+                return []
+
         mid_px = features.mid_price
         z = features.global_delta_z
         obi = features.obi_10_levels
@@ -253,7 +296,7 @@ class BaselineOrderFlowStrategy(Strategy):
 
         # 2. Bloqueo de orden en vuelo (in-flight): no emitir si hay orden activa pendiente
         has_in_flight = any(
-            o.symbol == self.symbol
+            (o.symbol == self.symbol or o.symbol.replace("-PERP", "").replace("-", "") == self.symbol.replace("-PERP", "").replace("-", ""))
             and o.status.name
             in ("PENDING_RISK", "AUTHORIZED", "SUBMITTED", "NEW", "PARTIALLY_FILLED")
             for o in self._active_orders.values()
@@ -278,9 +321,20 @@ class BaselineOrderFlowStrategy(Strategy):
         min_tick_dist = self.min_ticks_sl * self.tick_size
         sl_dist = max(mid_px * effective_sl, min_tick_dist)
         tp_dist = max(mid_px * effective_tp, min_tick_dist * 2.0)
+        trade_qty = self.get_trade_size(mid_px)
 
         # Señal LONG
         if z >= self.z_threshold and obi >= self.obi_threshold:
+            # Filtro de Tendencia Superior (HTF)
+            if self.enable_htf_filter and features.htf_trend_regime == "BEARISH":
+                logger.info(
+                    "strategy.htf_reject_long: señal descartada por régimen bajista HTF (price=%.2f < EMA15m=%.2f o CVD=%.1f < 0)",
+                    mid_px,
+                    features.htf_ema_15m,
+                    features.global_cvd,
+                )
+                return []
+
             if not self._validate_anti_spoofing("BUY", features):
                 return []
 
@@ -291,7 +345,7 @@ class BaselineOrderFlowStrategy(Strategy):
 
             self._last_order_ts_ns = features.timestamp_ns
             logger.info(
-                "strategy.signal_long: symbol=%s z=%.2f obi=%.2f px=%.2f sl=%.2f tp=%.2f type=%s size=%.4f",
+                "strategy.signal_long: symbol=%s z=%.2f obi=%.2f px=%.2f sl=%.2f tp=%.2f type=%s size=%.4f (notional=$%.2f)",
                 self.symbol,
                 z,
                 obi,
@@ -299,14 +353,15 @@ class BaselineOrderFlowStrategy(Strategy):
                 stop_px,
                 tp_px,
                 self.entry_order_type,
-                self.trade_size,
+                trade_qty,
+                trade_qty * mid_px,
             )
             return [
                 OrderRequest(
                     symbol=self.symbol,
                     side="BUY",
                     order_type=self.entry_order_type,  # type: ignore[arg-type]
-                    quantity=self.trade_size,
+                    quantity=trade_qty,
                     price=order_px,
                     time_in_force=tif,  # type: ignore[arg-type]
                     stop_loss_price=stop_px,
@@ -316,6 +371,16 @@ class BaselineOrderFlowStrategy(Strategy):
 
         # Señal SHORT
         if z <= -self.z_threshold and obi <= -self.obi_threshold:
+            # Filtro de Tendencia Superior (HTF)
+            if self.enable_htf_filter and features.htf_trend_regime == "BULLISH":
+                logger.info(
+                    "strategy.htf_reject_short: señal descartada por régimen alcista HTF (price=%.2f > EMA15m=%.2f o CVD=%.1f > 0)",
+                    mid_px,
+                    features.htf_ema_15m,
+                    features.global_cvd,
+                )
+                return []
+
             if not self._validate_anti_spoofing("SELL", features):
                 return []
 
@@ -326,7 +391,7 @@ class BaselineOrderFlowStrategy(Strategy):
 
             self._last_order_ts_ns = features.timestamp_ns
             logger.info(
-                "strategy.signal_short: symbol=%s z=%.2f obi=%.2f px=%.2f sl=%.2f tp=%.2f type=%s size=%.4f",
+                "strategy.signal_short: symbol=%s z=%.2f obi=%.2f px=%.2f sl=%.2f tp=%.2f type=%s size=%.4f (notional=$%.2f)",
                 self.symbol,
                 z,
                 obi,
@@ -334,14 +399,15 @@ class BaselineOrderFlowStrategy(Strategy):
                 stop_px,
                 tp_px,
                 self.entry_order_type,
-                self.trade_size,
+                trade_qty,
+                trade_qty * mid_px,
             )
             return [
                 OrderRequest(
                     symbol=self.symbol,
                     side="SELL",
                     order_type=self.entry_order_type,  # type: ignore[arg-type]
-                    quantity=self.trade_size,
+                    quantity=trade_qty,
                     price=order_px,
                     time_in_force=tif,  # type: ignore[arg-type]
                     stop_loss_price=stop_px,

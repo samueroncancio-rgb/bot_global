@@ -13,6 +13,8 @@ def _create_test_feature_vector(
     mid_price: float = 50000.0,
     persistence: float = 0.80,
     realized_vol: float = 0.0020,
+    htf_ema_15m: float = 0.0,
+    htf_trend_regime: str = "NEUTRAL",
 ) -> FeatureVector:
     return FeatureVector(
         symbol=symbol,
@@ -32,6 +34,8 @@ def _create_test_feature_vector(
         liquidation_intensity=0.0,
         funding_rate=0.0001,
         open_interest_usd=1000000.0,
+        htf_ema_15m=htf_ema_15m,
+        htf_trend_regime=htf_trend_regime,
     )
 
 
@@ -187,7 +191,7 @@ def test_baseline_strategy_adaptive_sizing_for_eth_and_btc() -> None:
     assert strat_btc.tick_size == 0.1
 
     strat_eth = BaselineOrderFlowStrategy(symbol="ETH-USDT-PERP")
-    assert strat_eth.trade_size == 0.01
+    assert strat_eth.trade_size == 0.02
     assert strat_eth.tick_size == 0.01
 
 
@@ -430,3 +434,118 @@ def test_baseline_strategy_in_flight_guard_blocks_duplicate_entries() -> None:
 
     orders_after = strat.on_feature_vector(features, portfolio)
     assert len(orders_after) == 1, "Debe permitir orden una vez finalizada la orden anterior"
+
+
+def test_baseline_strategy_single_position_lock() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="ETH-USDT-PERP",
+        z_threshold=1.8,
+        obi_threshold=0.20,
+        cooldown_sec=0.0,
+        enable_flow_invalidation=False,
+    )
+    portfolio = PortfolioState(initial_daily_balance=100.0, current_wallet_balance=100.0)
+    # Posición LONG abierta registrada con símbolo nativo "ETHUSDT"
+    portfolio.positions["ETHUSDT"] = PositionState(
+        symbol="ETHUSDT",
+        size=0.02,
+        entry_price=1780.0,
+        mark_price=1780.0,
+        unrealized_pnl=0.0,
+        leverage=3,
+    )
+
+    features = _create_test_feature_vector(
+        symbol="ETH-USDT-PERP",
+        global_delta_z=2.5,
+        obi=0.45,
+        mid_price=1780.0,
+    )
+
+    # Con la posición abierta, NO debe emitir orden de entrada (Single-Position Lock)
+    orders = strat.on_feature_vector(features, portfolio)
+    assert len(orders) == 0, "Single-Position Lock debe bloquear cualquier nueva entrada mientras haya posición"
+
+
+def test_baseline_strategy_eth_minimum_notional_guard() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="ETH-USDT-PERP",
+        trade_size=None,  # dinámico
+    )
+    # A $1,770 USD, 0.02 ETH = $35.40 USD (supera mínimo $20)
+    qty1 = strat.get_trade_size(1770.0)
+    assert qty1 >= 0.02
+    assert qty1 * 1770.0 >= 21.0
+
+    # Si ETH cayera a $800 USD, debe ajustar el tamaño para superar el nocional mínimo de Binance
+    qty2 = strat.get_trade_size(800.0)
+    assert qty2 * 800.0 >= 21.0
+
+
+def test_baseline_strategy_swing_parameters_default() -> None:
+    strat = BaselineOrderFlowStrategy(symbol="ETH-USDT-PERP")
+    assert strat.stop_loss_pct == 0.0050  # 0.50%
+    assert strat.take_profit_pct == 0.0120  # 1.20%
+    assert strat.enable_htf_filter is True
+    assert strat.enable_flow_invalidation is False
+    assert strat.post_close_cooldown_sec == 120.0
+
+
+def test_baseline_strategy_htf_rejects_counter_trend_signals() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="ETH-USDT-PERP",
+        z_threshold=1.8,
+        obi_threshold=0.20,
+        enable_htf_filter=True,
+    )
+    portfolio = PortfolioState(initial_daily_balance=100.0, current_wallet_balance=100.0)
+
+    # 1. Señal BUY pero régimen HTF BEARISH -> Debe ser rechazada
+    feat_long_bearish = _create_test_feature_vector(
+        symbol="ETH-USDT-PERP",
+        global_delta_z=2.5,
+        obi=0.45,
+        mid_price=1750.0,
+        htf_ema_15m=1800.0,
+        htf_trend_regime="BEARISH",
+    )
+    orders = strat.on_feature_vector(feat_long_bearish, portfolio)
+    assert len(orders) == 0, "HTF filter debe descartar compras si el régimen HTF es BEARISH"
+
+    # 2. Señal SELL pero régimen HTF BULLISH -> Debe ser rechazada
+    feat_short_bullish = _create_test_feature_vector(
+        symbol="ETH-USDT-PERP",
+        global_delta_z=-2.5,
+        obi=-0.45,
+        mid_price=1850.0,
+        htf_ema_15m=1800.0,
+        htf_trend_regime="BULLISH",
+    )
+    orders = strat.on_feature_vector(feat_short_bullish, portfolio)
+    assert len(orders) == 0, "HTF filter debe descartar ventas si el régimen HTF es BULLISH"
+
+
+def test_baseline_strategy_htf_allows_trend_aligned_signals() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="ETH-USDT-PERP",
+        z_threshold=1.8,
+        obi_threshold=0.20,
+        enable_htf_filter=True,
+    )
+    portfolio = PortfolioState(initial_daily_balance=100.0, current_wallet_balance=100.0)
+
+    # Señal BUY alineada con BULLISH
+    feat_long_bullish = _create_test_feature_vector(
+        symbol="ETH-USDT-PERP",
+        global_delta_z=2.5,
+        obi=0.45,
+        mid_price=1850.0,
+        htf_ema_15m=1800.0,
+        htf_trend_regime="BULLISH",
+    )
+    orders = strat.on_feature_vector(feat_long_bullish, portfolio)
+    assert len(orders) == 1
+    assert orders[0].side == "BUY"
+    assert orders[0].stop_loss_price < 1850.0
+    assert orders[0].take_profit_price > 1850.0
+

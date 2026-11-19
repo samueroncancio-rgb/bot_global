@@ -39,9 +39,9 @@ class BinancePrivateWsClient:
         self.on_account_update = on_account_update
 
         self.ws_base_url = (
-            "wss://stream.binancefuture.com/private"
+            "wss://stream.binancefuture.com/ws"
             if testnet
-            else "wss://fstream.binance.com/private"
+            else "wss://fstream.binance.com/ws"
         )
         self._listen_key: str | None = None
         self._running = False
@@ -110,7 +110,7 @@ class BinancePrivateWsClient:
                     await asyncio.sleep(5.0)
                     continue
 
-            url = f"{self.ws_base_url}?listenKey={self._listen_key}"
+            url = f"{self.ws_base_url}/{self._listen_key}"
 
             # Validación de segregación de categoría
             if not url.startswith(self.ws_base_url):

@@ -1,6 +1,7 @@
 """Módulo de observabilidad, métricas Prometheus y sondas de salud."""
 
 from obbot.obs.health import HealthServer
+from obbot.obs.telegram import TelegramBotService
 from obbot.obs.metrics import (
     CVD_USD,
     DAILY_DRAWDOWN_PCT,
@@ -33,5 +34,6 @@ __all__ = [
     "RTT_LATENCY_MS",
     "WALLET_BALANCE_USD",
     "HealthServer",
+    "TelegramBotService",
     "start_metrics_server",
 ]

@@ -40,6 +40,7 @@ from obbot.lakehouse.bronze_writer import BronzeWriter
 from obbot.lakehouse.s3 import create_storage_backend
 from obbot.obs.health import HealthServer
 from obbot.obs.metrics import start_metrics_server
+from obbot.obs.telegram import TelegramBotService
 from obbot.risk.guard import RiskGuard
 from obbot.risk.kill_switch import FiveLayerKillSwitch, KillSwitchAction
 from obbot.risk.limits import PortfolioState, PositionState, RiskLimits
@@ -71,6 +72,18 @@ class OrderFlowBotApp:
         self.total_trades_received: int = 0
         self.total_books_received: int = 0
         self.total_orders_submitted: int = 0
+        self.telegram: TelegramBotService | None = None
+        self._stop_event: asyncio.Event | None = None
+        self._last_tripped_action: KillSwitchAction = KillSwitchAction.NONE
+        self._bg_tasks: set[asyncio.Task[Any]] = set()
+        self.adapters: list[Any] = []
+
+    def _fire_and_forget(self, coro: Any) -> asyncio.Task[Any]:
+        """Crea una tarea en segundo plano no bloqueante y retiene una referencia para evitar GC prematuro."""
+        t = asyncio.create_task(coro)
+        self._bg_tasks.add(t)
+        t.add_done_callback(self._bg_tasks.discard)
+        return t
 
     async def start(self) -> None:
         """Inicia todos los subsistemas de forma secuencial y supervisada."""
@@ -113,6 +126,7 @@ class OrderFlowBotApp:
             max_daily_drawdown_pct=float(l_cfg.get("max_daily_drawdown_pct", 0.05)),
             max_trade_loss_pct=float(l_cfg.get("max_trade_loss_pct", 0.02)),
             fat_finger_price_deviation_pct=float(l_cfg.get("fat_finger_price_deviation_pct", 0.02)),
+            max_orders_per_minute=int(l_cfg.get("max_orders_per_minute", 5)),
             max_data_staleness_ms=float(ks_cfg.get("max_data_staleness_ms", 1000.0)),
             max_book_desync_ms=float(ks_cfg.get("max_book_desync_ms", 300.0)),
             max_acceptable_rtt_ms=float(lat_cfg.get("max_acceptable_rtt_ms", 600.0)),
@@ -174,10 +188,25 @@ class OrderFlowBotApp:
             clock=self.clock,
         )
 
-        # 6. Estrategia Baseline
+        if self.mode != "paper":
+            try:
+                await self.reconciler.reconcile_balance(self.portfolio)
+                await self.reconciler.reconcile_positions(self.portfolio)
+                klines = await rest_client.get_klines(self.symbol, interval="15m", limit=50)
+                if klines:
+                    self.feature_engine.htf_tracker.seed_from_klines(klines)
+            except Exception as e:
+                logger.warning(f"Error en reconciliación inicial de balance/posiciones/klines: {e}")
+
+        # 6. Estrategia Baseline (Swing Intradía con Filtro de Tendencia Superior HTF)
         self.strategy = BaselineOrderFlowStrategy(
             symbol=self.symbol,
             use_dynamic_volatility=True,
+            enable_flow_invalidation=False,
+            stop_loss_pct=0.0050,
+            take_profit_pct=0.0120,
+            enable_htf_filter=True,
+            post_close_cooldown_sec=120.0,
         )
 
         # 7. Iniciar Observabilidad (Métricas Prometheus y Health Checks)
@@ -231,6 +260,16 @@ class OrderFlowBotApp:
         # C) Bucle de estrategia desacoplado (100ms)
         self._tasks.append(asyncio.create_task(self._run_strategy_loop()))
 
+        # 11. Iniciar Telegram Bot si está configurado y habilitado
+        if self.config.env.telegram_enabled and self.config.env.telegram_bot_token:
+            self.telegram = TelegramBotService(
+                bot_token=self.config.env.telegram_bot_token,
+                chat_id=self.config.env.telegram_chat_id,
+                allowed_user_ids=self.config.env.telegram_allowed_user_ids,
+                app=self,
+            )
+            await self.telegram.start()
+
         logger.info("app.started_successfully: listening for order flow events")
 
     async def _handle_order_fill_event(
@@ -248,25 +287,68 @@ class OrderFlowBotApp:
             self.portfolio.positions = {}
 
         direction = 1.0 if side.upper() == "BUY" else -1.0
-        current_pos = self.portfolio.positions.get(self.symbol)
+        current_pos = self.portfolio.get_position(self.symbol)
         new_size = (
             (current_pos.size + filled_qty * direction) if current_pos else filled_qty * direction
         )
-        entry_px = current_pos.entry_price if current_pos else avg_price
-        self.portfolio.positions[self.symbol] = PositionState(
-            symbol=self.symbol,
-            size=new_size,
-            entry_price=entry_px,
-            mark_price=avg_price,
-            unrealized_pnl=0.0,
-            leverage=3,
-            margin_type="ISOLATED",
-        )
+        clean_sym = self.symbol.replace("-PERP", "").replace("-", "").upper()
+        if abs(new_size) < 1e-6:
+            self.portfolio.positions.pop(self.symbol, None)
+            self.portfolio.positions.pop(clean_sym, None)
+        else:
+            entry_px = (
+                current_pos.entry_price
+                if current_pos and abs(current_pos.size) > 1e-6
+                else avg_price
+            )
+            pos = PositionState(
+                symbol=self.symbol,
+                size=new_size,
+                entry_price=entry_px,
+                mark_price=avg_price,
+                unrealized_pnl=0.0,
+                leverage=3,
+                margin_type="ISOLATED",
+            )
+            self.portfolio.positions[self.symbol] = pos
+            self.portfolio.positions[clean_sym] = pos
+
+        # Sincronizar balance de custodia de Binance tras una ejecución
+        if self.mode != "paper":
+            self._fire_and_forget(self.reconciler.reconcile_balance(self.portfolio))
 
         # Notificar a la estrategia sobre el estado de la orden
         order = self.order_manager.get_order(client_order_id)
         if order:
             self.strategy.on_order_update(order)
+            if self.telegram:
+                sl = order.stop_loss_price
+                tp = order.take_profit_price
+                red = order.reduce_only
+                self._fire_and_forget(
+                    self.telegram.notify_order_fill(
+                        symbol=self.symbol,
+                        side=side,
+                        quantity=filled_qty,
+                        price=avg_price,
+                        reduce_only=red,
+                        stop_loss=sl,
+                        take_profit=tp,
+                    )
+                )
+        else:
+            if self.telegram:
+                self._fire_and_forget(
+                    self.telegram.notify_order_fill(
+                        symbol=self.symbol,
+                        side=side,
+                        quantity=filled_qty,
+                        price=avg_price,
+                        reduce_only=(abs(new_size) < 1e-6),
+                        stop_loss=None,
+                        take_profit=None,
+                    )
+                )
 
     async def _handle_paper_fill(
         self,
@@ -285,6 +367,19 @@ class OrderFlowBotApp:
         cum_qty = float(order_data.get("z", 0.0))
         avg_px = float(order_data.get("ap", 0.0))
         side = order_data.get("S", "BUY")
+        rp = float(order_data.get("rp", 0.0))
+
+        if rp != 0.0:
+            self.portfolio.realized_daily_pnl += rp
+            self.portfolio.current_wallet_balance = (
+                self.portfolio.initial_daily_balance + self.portfolio.realized_daily_pnl
+            )
+            logger.info(
+                "portfolio.realized_pnl: delta=%.4f total=%.4f balance=%.2f",
+                rp,
+                self.portfolio.realized_daily_pnl,
+                self.portfolio.current_wallet_balance,
+            )
 
         if status == "FILLED":
             await self._handle_order_fill_event(cid, cum_qty, avg_px, side)
@@ -322,9 +417,9 @@ class OrderFlowBotApp:
             self.feature_engine.on_funding_oi(event)
 
     async def _run_strategy_loop(self) -> None:
-        """Bucle desacoplado a 10 Hz (100ms) para evaluación cuantitativa y ejecución."""
+        """Bucle desacoplado a 2.5 Hz (400ms) para evaluación cuantitativa y ejecución."""
         interval_sec = (
-            self.config.features.get("features", {}).get("sampling_interval_ms", 100) / 1000.0
+            self.config.features.get("features", {}).get("sampling_interval_ms", 400) / 1000.0
         )
         while self.running:
             try:
@@ -335,6 +430,17 @@ class OrderFlowBotApp:
                     orders = self.strategy.on_feature_vector(fv, self.portfolio)
                     for req in orders:
                         self.total_orders_submitted += 1
+                        if self.telegram and req.reduce_only:
+                            self._fire_and_forget(
+                                self.telegram.notify_early_invalidation(
+                                    symbol=self.symbol,
+                                    side=req.side,
+                                    quantity=req.quantity,
+                                    reason="Reversión violenta de Delta Z / OBI",
+                                    z_score=fv.global_delta_z,
+                                    obi=fv.obi_10_levels,
+                                )
+                            )
                         await self.order_manager.submit_order(req, self.portfolio, fv.mid_price)
             except asyncio.CancelledError:
                 break
@@ -379,6 +485,24 @@ class OrderFlowBotApp:
                     current_unrealized_loss_pct=unrealized_loss_pct,
                     now_ns=now_ns,
                 )
+
+                # Notificar a Telegram si el Kill-Switch se disparó
+                highest_action = self.kill_switch.get_highest_severity_action()
+                if (
+                    highest_action != self._last_tripped_action
+                    and highest_action != KillSwitchAction.NONE
+                ):
+                    self._last_tripped_action = highest_action
+                    if self.telegram:
+                        for layer, state in self.kill_switch._layers.items():
+                            if state.triggered:
+                                self._fire_and_forget(
+                                    self.telegram.notify_kill_switch_tripped(
+                                        layer=layer,
+                                        action=state.action,
+                                        reason=state.reason,
+                                    )
+                                )
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -392,12 +516,32 @@ class OrderFlowBotApp:
         logger.info("app.stopping...")
         self.running = False
 
+        # Notificar fin de sesión a Telegram si estaba activo
+        if self.telegram:
+            initial_bal = self.portfolio.initial_daily_balance
+            final_bal = (
+                self.paper_engine.wallet_balance
+                if hasattr(self, "paper_engine")
+                else self.portfolio.current_wallet_balance
+            )
+            pnl = final_bal - initial_bal
+            pnl_pct = (pnl / initial_bal) * 100.0 if initial_bal > 0 else 0.0
+            await self.telegram.send_message(
+                f"🛑 *SESIÓN FINALIZADA - {self.symbol}*\n"
+                f"• Modo: `{self.mode.upper()}`\n"
+                f"• PnL Neto: `${pnl:+,.2f} USD` (`{pnl_pct:+.2f}%`)\n"
+                f"• Balance Final: `${final_bal:,.2f} USD`\n"
+                f"• Trades: `{self.total_trades_received}` | L2 Books: `{self.total_books_received}`"
+            )
+            await self.telegram.stop()
+
         # 1. Poner Kill-Switch en bloqueo de entradas
-        self.kill_switch.trigger_manual(
-            "Parada del sistema",
-            now_ns=self.clock.now_ns(),
-            action=KillSwitchAction.BLOCK_NEW_ENTRIES,
-        )
+        if hasattr(self, "kill_switch") and self.kill_switch:
+            self.kill_switch.trigger_manual(
+                "Parada del sistema",
+                now_ns=self.clock.now_ns(),
+                action=KillSwitchAction.BLOCK_NEW_ENTRIES,
+            )
 
         # 2. Cancelar tareas en segundo plano
         for t in self._tasks:
@@ -407,7 +551,7 @@ class OrderFlowBotApp:
             self._tasks.clear()
 
         # 3. Detener Private WS si estaba activo
-        if hasattr(self, "private_ws"):
+        if hasattr(self, "private_ws") and self.private_ws:
             await self.private_ws.stop()
 
         # 4. Detener adaptadores de ingestión
@@ -415,11 +559,11 @@ class OrderFlowBotApp:
             await adapter.stop()
 
         # 5. Detener BronzeWriter y volcar buffers
-        if hasattr(self, "bronze_writer"):
+        if hasattr(self, "bronze_writer") and self.bronze_writer:
             await self.bronze_writer.stop()
 
         # 6. Detener Servidor de Salud
-        if hasattr(self, "health_server"):
+        if hasattr(self, "health_server") and self.health_server:
             await self.health_server.stop()
 
         # 7. Detener Bus
@@ -430,6 +574,9 @@ class OrderFlowBotApp:
 
     def print_session_summary(self) -> None:
         """Imprime un resumen de métricas y rendimiento al finalizar la sesión."""
+        if not hasattr(self, "portfolio") or not hasattr(self, "feature_engine"):
+            return
+
         now_ns = self.clock.now_ns()
         fv = self.feature_engine.compute_feature_vector(now_ns)
         initial_bal = self.portfolio.initial_daily_balance
@@ -535,6 +682,7 @@ async def async_main() -> None:
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
+    app._stop_event = stop_event
 
     def _sig_handler() -> None:
         logger.info("Señal de terminación recibida. Iniciando parada limpia...")

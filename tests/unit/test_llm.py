@@ -1,6 +1,6 @@
 """Tests unitarios para el módulo LLM offline de auditoría post-sesión."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -39,11 +39,11 @@ async def test_generate_end_of_session_report() -> None:
 
 
 def test_create_llm_provider_without_keys_returns_none() -> None:
-    with patch.dict("os.environ", {}, clear=True):
-        # Sin variables de entorno configuradas
-        provider = create_llm_provider()
-        # Debe ser None para asegurar desacoplamiento total y opcionalidad
-        assert provider is None
+    mock_config = MagicMock()
+    mock_config.env.gemini_api_key = ""
+    mock_config.env.llm_api_key = ""
+    provider = create_llm_provider(mock_config)
+    assert provider is None
 
 
 @pytest.mark.asyncio
