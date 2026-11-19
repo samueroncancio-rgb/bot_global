@@ -20,6 +20,7 @@ class DynamicWeightCalculator:
         clamp_min: float = 0.05,
         clamp_max: float = 0.60,
         window_sec: float = 300.0,
+        correlation_rho: float = 0.85,
     ) -> None:
         self.symbol = symbol
         self.priors: dict[str, float] = priors or {
@@ -34,6 +35,7 @@ class DynamicWeightCalculator:
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
         self.window_ns = int(window_sec * 1_000_000_000)
+        self.correlation_rho = correlation_rho
 
         # Volúmenes rodantes: exchange -> deque de (timestamp_ns, notional_usd)
         self._vol_history: dict[str, deque[tuple[int, float]]] = {ex: deque() for ex in self.priors}
@@ -134,17 +136,40 @@ class DynamicWeightCalculator:
         return dict(self._current_weights)
 
     def compute_global_delta(
-        self, z_scores: dict[str, float], current_ts_ns: int
+        self,
+        z_scores: dict[str, float],
+        current_ts_ns: int,
+        standardize: bool = True,
     ) -> tuple[float, dict[str, float]]:
         """
-        Calcula el Delta Global ponderado: Delta_global = sum(w_i * z(Delta_i)).
-        Retorna la señal consolidada y el diccionario de pesos aplicados.
+        Calcula el Delta Global consolidado con estandarización formal por covarianza.
+
+        Bajo la Solución A (Estandarización por Covarianza):
+        S = sum(w_i * z_i)
+        Var(S) = (1 - rho) * sum(w_i^2) + rho * (sum(w_i))^2
+        global_delta = S / sqrt(Var(S))
+
+        Garantiza que la señal consolidada conserve una varianza unitaria (Z-Score real).
         """
         weights = self.update_weights(current_ts_ns)
-        global_delta = 0.0
+        raw_delta = 0.0
+        active_weights: list[float] = []
 
         for ex, z in z_scores.items():
             w = weights.get(ex.lower(), 0.0)
-            global_delta += w * z
+            if w > 0.0:
+                raw_delta += w * z
+                active_weights.append(w)
 
-        return global_delta, weights
+        if not standardize or not active_weights:
+            return raw_delta, weights
+
+        sum_w = sum(active_weights)
+        sum_w_sq = sum(w * w for w in active_weights)
+        rho = self.correlation_rho
+        variance_composite = (1.0 - rho) * sum_w_sq + rho * (sum_w**2)
+        std_composite = variance_composite**0.5
+
+        standardized_delta = raw_delta / std_composite if std_composite > 1e-9 else raw_delta
+
+        return standardized_delta, weights

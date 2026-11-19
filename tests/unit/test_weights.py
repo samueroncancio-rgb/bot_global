@@ -30,7 +30,7 @@ def test_dynamic_weights_clamping_and_normalization() -> None:
 
 
 def test_dynamic_weights_global_delta() -> None:
-    calc = DynamicWeightCalculator(symbol="BTC-USDT-PERP")
+    calc = DynamicWeightCalculator(symbol="BTC-USDT-PERP", correlation_rho=0.85)
 
     # z-scores por exchange
     z_scores = {
@@ -40,9 +40,18 @@ def test_dynamic_weights_global_delta() -> None:
         "bybit": 0.5,
     }
 
+    # 1. Con estandarización formal por covarianza (Solución A)
     global_delta, weights = calc.compute_global_delta(z_scores, current_ts_ns=1_000_000)
 
-    # Verificar cálculo ponderado
-    expected_delta = sum(weights[ex] * z_scores[ex] for ex in z_scores)
-    assert global_delta == pytest.approx(expected_delta, abs=1e-6)
+    raw_expected = sum(weights[ex] * z_scores[ex] for ex in z_scores)
+    sum_w = sum(weights.values())
+    sum_w_sq = sum(w * w for w in weights.values())
+    var_comp = (1.0 - 0.85) * sum_w_sq + 0.85 * (sum_w**2)
+    expected_std = raw_expected / (var_comp**0.5)
+
+    assert global_delta == pytest.approx(expected_std, abs=1e-6)
     assert sum(weights.values()) == pytest.approx(1.0, abs=1e-6)
+
+    # 2. Modo sin estandarización para cálculo directo
+    raw_delta, _ = calc.compute_global_delta(z_scores, current_ts_ns=1_000_000, standardize=False)
+    assert raw_delta == pytest.approx(raw_expected, abs=1e-6)
