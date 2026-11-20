@@ -57,6 +57,8 @@ class BaselineOrderFlowStrategy(Strategy):
         invalidation_obi_threshold: float = 0.25,
         enable_anti_spoofing: bool = True,
         enable_htf_filter: bool = True,
+        enable_session_filter: bool = True,
+        asian_session_z_threshold: float = 2.2,
         min_persistence: float = 0.50,
         min_confirming_venues: int = 2,
         require_persistence_warmup: bool = False,
@@ -69,6 +71,8 @@ class BaselineOrderFlowStrategy(Strategy):
         self.cooldown_sec = cooldown_sec
         self.post_close_cooldown_sec = post_close_cooldown_sec
         self.enable_htf_filter = enable_htf_filter
+        self.enable_session_filter = enable_session_filter
+        self.asian_session_z_threshold = asian_session_z_threshold
         self._last_order_ts_ns: int = 0
         self._last_position_closed_ts_ns: int = 0
         self._prev_position_size: float = 0.0
@@ -312,7 +316,11 @@ class BaselineOrderFlowStrategy(Strategy):
             friction_floor = friction_pct * 2.0  # Suelo reforzado a 2x fricción total
 
             effective_sl = max(self.min_sl_pct, friction_floor, min(self.max_sl_pct, raw_sl))
-            effective_tp = max(effective_sl * 2.0, friction_pct * 3.0)  # TP mínimo 3x fricción
+            # Garantizar que el TP conserve como mínimo el ratio Swing diseñado (2.4x nominal)
+            min_rr_ratio = (
+                self.take_profit_pct / self.stop_loss_pct if self.stop_loss_pct > 0 else 2.4
+            )
+            effective_tp = max(effective_sl * min_rr_ratio, friction_pct * 3.0)
         else:
             effective_sl = self.stop_loss_pct
             effective_tp = self.take_profit_pct
@@ -323,8 +331,17 @@ class BaselineOrderFlowStrategy(Strategy):
         tp_dist = max(mid_px * effective_tp, min_tick_dist * 2.0)
         trade_qty = self.get_trade_size(mid_px)
 
+        # Filtro de horarios de sesión institucional (UTC):
+        # Sesión asiática / baja liquidez: 22:00 a 07:00 UTC -> Exige mayor confirmación (Z-score 2.2)
+        utc_hour = (features.timestamp_ns // 1_000_000_000 // 3600) % 24
+        is_asian_session = (utc_hour >= 22 or utc_hour < 7) and self.enable_session_filter
+        effective_z_threshold = self.asian_session_z_threshold if is_asian_session else self.z_threshold
+        effective_obi_threshold = (
+            max(self.obi_threshold, 0.25) if is_asian_session else self.obi_threshold
+        )
+
         # Señal LONG
-        if z >= self.z_threshold and obi >= self.obi_threshold:
+        if z >= effective_z_threshold and obi >= effective_obi_threshold:
             # Filtro de Tendencia Superior (HTF)
             if self.enable_htf_filter and features.htf_trend_regime == "BEARISH":
                 logger.info(
@@ -370,7 +387,7 @@ class BaselineOrderFlowStrategy(Strategy):
             ]
 
         # Señal SHORT
-        if z <= -self.z_threshold and obi <= -self.obi_threshold:
+        if z <= -effective_z_threshold and obi <= -effective_obi_threshold:
             # Filtro de Tendencia Superior (HTF)
             if self.enable_htf_filter and features.htf_trend_regime == "BULLISH":
                 logger.info(

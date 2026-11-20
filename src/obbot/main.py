@@ -295,6 +295,8 @@ class OrderFlowBotApp:
         if abs(new_size) < 1e-6:
             self.portfolio.positions.pop(self.symbol, None)
             self.portfolio.positions.pop(clean_sym, None)
+            # Cancelar de inmediato cualquier Algo Order residual (SL o TP huérfano)
+            self._fire_and_forget(self.order_manager.cancel_algo_orders_for_symbol(self.symbol))
         else:
             entry_px = (
                 current_pos.entry_price

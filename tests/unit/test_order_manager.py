@@ -156,3 +156,52 @@ async def test_order_manager_stop_loss_watchdog_failure_triggers_emergency_marke
     assert last_call.kwargs["side"] == "SELL"  # Opuesto a BUY
     assert last_call.kwargs["order_type"] == "MARKET"
     assert last_call.kwargs["reduce_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_order_manager_bracket_sl_and_tp_attached_on_fill() -> None:
+    rest_mock = AsyncMock(spec=BinanceFuturesRestClient)
+    algo_mock = AsyncMock(spec=BinanceAlgoOrderClient)
+    rest_mock.create_order.return_value = {"orderId": 8888, "status": "NEW"}
+    algo_mock.create_stop_loss.return_value = {"algoId": 7777, "status": "NEW"}
+    algo_mock.create_take_profit.return_value = {"algoId": 7778, "status": "NEW"}
+
+    guard = RiskGuard()
+    manager = OrderManager(rest_mock, algo_mock, guard)
+    portfolio = PortfolioState(initial_daily_balance=10000.0, current_wallet_balance=10000.0)
+
+    request = OrderRequest(
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="LIMIT",
+        quantity=0.01,
+        price=50000.0,
+        stop_loss_price=49000.0,
+        take_profit_price=52000.0,
+    )
+
+    order = await manager.submit_order(request, portfolio, current_mark_price=50000.0)
+    await manager.on_order_fill(order.client_order_id, filled_qty=0.01, avg_price=50000.0)
+    await asyncio.sleep(0.1)
+
+    updated_order = manager.get_order(order.client_order_id)
+    assert updated_order is not None
+    assert updated_order.algo_stop_id == 7777
+    assert updated_order.algo_tp_id == 7778
+
+    algo_mock.create_stop_loss.assert_awaited_once_with(
+        symbol="BTCUSDT",
+        side="SELL",
+        trigger_price=49000.0,
+        quantity=0.01,
+        close_position=False,
+        client_algo_id=f"SL_{order.client_order_id}",
+    )
+    algo_mock.create_take_profit.assert_awaited_once_with(
+        symbol="BTCUSDT",
+        side="SELL",
+        trigger_price=52000.0,
+        quantity=0.01,
+        close_position=False,
+        client_algo_id=f"TP_{order.client_order_id}",
+    )

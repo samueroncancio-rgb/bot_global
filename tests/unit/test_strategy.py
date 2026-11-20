@@ -15,10 +15,11 @@ def _create_test_feature_vector(
     realized_vol: float = 0.0020,
     htf_ema_15m: float = 0.0,
     htf_trend_regime: str = "NEUTRAL",
+    timestamp_ns: int = 14 * 3600 * 1_000_000_000,  # 14:00 UTC (Sesión Londres / NY)
 ) -> FeatureVector:
     return FeatureVector(
         symbol=symbol,
-        timestamp_ns=1_000_000_000,
+        timestamp_ns=timestamp_ns,
         delta_by_exchange={"binance": 100.0},
         z_delta_by_exchange={"binance": global_delta_z},
         weights_by_exchange={"binance": 1.0},
@@ -548,4 +549,65 @@ def test_baseline_strategy_htf_allows_trend_aligned_signals() -> None:
     assert orders[0].side == "BUY"
     assert orders[0].stop_loss_price < 1850.0
     assert orders[0].take_profit_price > 1850.0
+
+
+def test_baseline_strategy_asian_session_higher_confirmation() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="BTCUSDT",
+        z_threshold=1.8,
+        obi_threshold=0.20,
+        asian_session_z_threshold=2.2,
+        enable_session_filter=True,
+    )
+    portfolio = PortfolioState(initial_daily_balance=100.0, current_wallet_balance=100.0)
+
+    # 03:00 UTC (Sesión Asiática)
+    asian_ts_ns = 3 * 3600 * 1_000_000_000
+
+    # 1. Señal con z=2.0 (supera 1.8, pero menor que 2.2 de Asia) -> Rechazada
+    feat_low = _create_test_feature_vector(
+        symbol="BTCUSDT",
+        global_delta_z=2.0,
+        obi=0.30,
+        timestamp_ns=asian_ts_ns,
+    )
+    assert len(strat.on_feature_vector(feat_low, portfolio)) == 0
+
+    # 2. Señal con z=2.3 (supera 2.2 de Asia) -> Aceptada
+    feat_high = _create_test_feature_vector(
+        symbol="BTCUSDT",
+        global_delta_z=2.3,
+        obi=0.30,
+        timestamp_ns=asian_ts_ns,
+    )
+    assert len(strat.on_feature_vector(feat_high, portfolio)) == 1
+
+
+def test_baseline_strategy_dynamic_volatility_preserves_swing_ratio() -> None:
+    strat = BaselineOrderFlowStrategy(
+        symbol="ETH-USDT-PERP",
+        stop_loss_pct=0.0050,
+        take_profit_pct=0.0120,
+        use_dynamic_volatility=True,
+        vol_multiplier=1.5,
+    )
+    portfolio = PortfolioState(initial_daily_balance=100.0, current_wallet_balance=100.0)
+
+    # Volatilidad realizada alta (0.0060 = 60 bps)
+    feat = _create_test_feature_vector(
+        symbol="ETH-USDT-PERP",
+        global_delta_z=2.5,
+        obi=0.35,
+        mid_price=2000.0,
+        realized_vol=0.0060,
+    )
+    orders = strat.on_feature_vector(feat, portfolio)
+    assert len(orders) == 1
+    order = orders[0]
+    sl_dist = 2000.0 - (order.stop_loss_price or 0.0)
+    tp_dist = (order.take_profit_price or 0.0) - 2000.0
+
+    # El ratio TP/SL debe ser al menos 2.40x nominal
+    ratio = tp_dist / sl_dist
+    assert ratio >= 2.39, f"El ratio R/B debe ser al menos 2.40x, se obtuvo {ratio:.2f}"
 

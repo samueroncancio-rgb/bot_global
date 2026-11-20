@@ -170,7 +170,7 @@ class StateReconciler:
                 elif "BTC" in clean_sym:
                     portfolio.positions["BTC-USDT-PERP"] = pos
 
-            # Auditoría: Comprobar que la posición cuente con Algo Stop-Loss activo
+            # Auditoría: Comprobar que la posición cuente con Algo Stop-Loss y Take-Profit activos
             expected_sl_side = "SELL" if size > 0 else "BUY"
             has_algo_sl = any(
                 str(algo_o.get("symbol", "")).replace("-PERP", "").replace("-", "").upper() == clean_sym
@@ -181,9 +181,24 @@ class StateReconciler:
                 )
                 for algo_o in remote_algo_orders
             )
+            has_algo_tp = any(
+                str(algo_o.get("symbol", "")).replace("-PERP", "").replace("-", "").upper() == clean_sym
+                and str(algo_o.get("side", "")).upper() == expected_sl_side
+                and (
+                    str(algo_o.get("orderType", "")).upper() in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT")
+                    or str(algo_o.get("algoType", "")).upper() in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT")
+                )
+                for algo_o in remote_algo_orders
+            )
             if not has_algo_sl:
                 logger.critical(
                     "reconciler.unprotected_position_detected: %s size=%.4f sin Algo Stop-Loss activo!",
+                    symbol,
+                    size,
+                )
+            if not has_algo_tp:
+                logger.warning(
+                    "reconciler.missing_take_profit: %s size=%.4f sin Algo Take-Profit activo",
                     symbol,
                     size,
                 )

@@ -106,6 +106,7 @@ class FeatureEngine:
         # Últimos valores de funding y OI
         self._latest_funding_rate: float = 0.0
         self._latest_oi_usd: float = 0.0
+        self._last_htf_update_ns: int = 0
 
     def register_bus_handlers(self, bus: EventBus) -> None:
         """Suscribe el motor a todos los tópicos relevantes del bus de eventos."""
@@ -120,8 +121,8 @@ class FeatureEngine:
         if ex in self.delta_trackers:
             self.delta_trackers[ex].on_trade(trade.ts_recv_ns, signed_notional)
 
-        # 2. CVD
-        self.cvd_tracker.on_trade(ex, signed_notional)
+        # 2. CVD (con seguimiento temporal para reseteo a 00:00 UTC)
+        self.cvd_tracker.on_trade(ex, signed_notional, trade.ts_recv_ns)
 
         # 3. Dynamic weights
         self.weight_calculator.record_trade(ex, trade.ts_recv_ns, trade.notional_usd)
@@ -129,8 +130,10 @@ class FeatureEngine:
         # 4. Historial de precios para volatilidad realizada
         self._price_history.append((trade.ts_recv_ns, trade.price))
 
-        # 5. Tracking de tendencia superior (HTF)
-        self.htf_tracker.on_price_update(trade.price, trade.ts_recv_ns)
+        # 5. Tracking de tendencia superior (HTF) muestreado a intervalos >= 250ms
+        if self._last_htf_update_ns == 0 or (trade.ts_recv_ns - self._last_htf_update_ns) >= 250_000_000:
+            self.htf_tracker.on_price_update(trade.price, trade.ts_recv_ns)
+            self._last_htf_update_ns = trade.ts_recv_ns
 
     def on_book_snapshot(self, snapshot: BookSnapshotEvent) -> None:
         """Actualiza el libro L2 y el cálculo de OBI tras un snapshot."""
@@ -211,15 +214,26 @@ class FeatureEngine:
         # 2. Delta Global dinámico
         global_delta, weights = self.weight_calculator.compute_global_delta(z_scores, now_ns)
 
-        # 3. OBI por exchange y persistencia de liquidez
+        # 3. OBI por exchange y persistencia de liquidez multi-exchange ponderada
         obi_map: dict[str, dict[int, float]] = {}
-        persistence = 0.0
+        persistences: list[float] = []
+        p_weights: list[float] = []
         for ex, obi_calc in self.obi_calculators.items():
             bids = self.books[ex].get_bids(20)
             asks = self.books[ex].get_asks(20)
             obi_map[ex] = {k: obi_calc.compute_weighted_obi(bids, asks, k) for k in [5, 10, 20]}
-            if ex == self.primary_exchange:
-                persistence = obi_calc.compute_persistence()
+            rho_ex = obi_calc.compute_persistence()
+            if abs(rho_ex) > 1e-6:
+                w = weights.get(ex, 0.25)
+                persistences.append(rho_ex * w)
+                p_weights.append(w)
+
+        if persistences and sum(p_weights) > 0.0:
+            persistence = sum(persistences) / sum(p_weights)
+        elif self.primary_exchange in self.obi_calculators:
+            persistence = self.obi_calculators[self.primary_exchange].compute_persistence()
+        else:
+            persistence = 0.0
 
         # 4. Precios, spreads y basis
         primary_book = self.books.get(self.primary_exchange)

@@ -118,14 +118,26 @@ class PaperExecutionEngine:
                 self.fill_order(client_id, fill_price=order.price)
 
     def _check_algo_triggers(self, symbol: str, current_price: float) -> None:
-        """Evalúa si el precio actual activa alguna Algo Order (Stop-Loss)."""
+        """Evalúa si el precio actual activa alguna Algo Order (Stop-Loss o Take-Profit)."""
         for _client_id, algo in list(self._algo_orders.items()):
             if algo.symbol != symbol or algo.status != "NEW":
                 continue
 
-            triggered = (algo.side == "SELL" and current_price <= algo.trigger_price) or (
-                algo.side == "BUY" and current_price >= algo.trigger_price
-            )
+            is_tp = "TAKE_PROFIT" in algo.algo_type.upper()
+            if is_tp:
+                # Para TAKE_PROFIT:
+                # - SELL (cierra LONG): se activa cuando el precio SUBE al trigger (price >= trigger)
+                # - BUY (cierra SHORT): se activa cuando el precio CAE al trigger (price <= trigger)
+                triggered = (algo.side == "SELL" and current_price >= algo.trigger_price) or (
+                    algo.side == "BUY" and current_price <= algo.trigger_price
+                )
+            else:
+                # Para STOP_MARKET:
+                # - SELL (cierra LONG): se activa cuando el precio CAE al trigger (price <= trigger)
+                # - BUY (cierra SHORT): se activa cuando el precio SUBE al trigger (price >= trigger)
+                triggered = (algo.side == "SELL" and current_price <= algo.trigger_price) or (
+                    algo.side == "BUY" and current_price >= algo.trigger_price
+                )
 
             if triggered:
                 algo.status = "TRIGGERED"
@@ -147,12 +159,21 @@ class PaperExecutionEngine:
                 )
                 self._notify_fill(algo.client_algo_id, qty, current_price, algo.side)
                 logger.info(
-                    "paper.algo_triggered: %s %s trigger=%.2f fill=%.2f",
+                    "paper.algo_triggered: %s %s %s trigger=%.2f fill=%.2f",
+                    algo.algo_type,
                     algo.client_algo_id,
                     algo.side,
                     algo.trigger_price,
                     current_price,
                 )
+
+                # Cancelación cruzada (OCO): si la posición se cerró a 0, cancelar la orden hermana
+                remaining_pos = self._positions.get(symbol, {})
+                if abs(remaining_pos.get("positionAmt", 0.0)) <= 1e-6:
+                    for sibling_id, sibling in list(self._algo_orders.items()):
+                        if sibling.symbol == symbol and sibling.status == "NEW":
+                            sibling.status = "CANCELLED"
+                            logger.info("paper.oco_cancelled_sibling: %s", sibling_id)
 
     def _execute_fill(
         self,

@@ -47,6 +47,7 @@ class ManagedOrder:
     stop_loss_price: float | None = None
     take_profit_price: float | None = None
     algo_stop_id: int | None = None
+    algo_tp_id: int | None = None
     created_at_ns: int = 0
     updated_at_ns: int = 0
     reject_reason: str = ""
@@ -239,46 +240,85 @@ class OrderManager:
         order.status = OrderStatus.FILLED
         order.updated_at_ns = self.clock.now_ns()
 
-        # Si es una entrada protegida y no reduce_only, adjuntar Stop-Loss inmediatamente
-        if not order.reduce_only and order.stop_loss_price is not None:
-            task = asyncio.create_task(self._attach_atomic_stop_loss_with_watchdog(order))
+        # Si es una entrada protegida y no reduce_only, adjuntar Bracket (Stop-Loss y Take-Profit) inmediatamente
+        if not order.reduce_only and (order.stop_loss_price is not None or order.take_profit_price is not None):
+            task = asyncio.create_task(self._attach_atomic_bracket_with_watchdog(order))
             self._stop_watchdogs[client_order_id] = task
 
     async def _attach_atomic_stop_loss_with_watchdog(self, order: ManagedOrder) -> None:
-        """Envía Algo Order de Stop-Loss y ejecuta salida forzosa si transcurren > 1500ms."""
-        assert order.stop_loss_price is not None
-        exit_side = "SELL" if order.side == "BUY" else "BUY"
-        client_algo_id = f"SL_{order.client_order_id}"
+        """Alias de compatibilidad: ejecuta el adjunto de bracket con watchdog."""
+        await self._attach_atomic_bracket_with_watchdog(order)
 
-        async def _try_send_stop() -> bool:
-            try:
-                res = await self.algo_client.create_stop_loss(
-                    symbol=order.symbol,
-                    side=exit_side,
-                    trigger_price=order.stop_loss_price,  # type: ignore[arg-type]
-                    quantity=order.filled_quantity or order.quantity,
-                    close_position=False,
-                    client_algo_id=client_algo_id,
-                )
-                order.algo_stop_id = res.get("algoId")
-                logger.info(
-                    "order_manager.stop_loss_attached: %s (algoId=%s)",
-                    order.client_order_id,
-                    order.algo_stop_id,
-                )
-                return True
-            except Exception as exc:
-                logger.critical(
-                    "order_manager.stop_loss_attach_failed: %s (%s)",
-                    order.client_order_id,
-                    exc,
-                )
-                return False
+    async def _attach_atomic_bracket_with_watchdog(self, order: ManagedOrder) -> None:
+        """
+        Envía Algo Orders de Stop-Loss y Take-Profit a Binance.
+        Ejecuta salida forzosa si el Stop-Loss no puede adjuntarse en <= 1500ms.
+        """
+        exit_side = "SELL" if order.side == "BUY" else "BUY"
+        qty = order.filled_quantity or order.quantity
+
+        async def _try_send_bracket() -> bool:
+            sl_ok = True
+            tp_ok = True
+
+            # 1. Adjuntar Stop-Loss (Crítico)
+            if order.stop_loss_price is not None:
+                client_algo_id_sl = f"SL_{order.client_order_id}"
+                try:
+                    res_sl = await self.algo_client.create_stop_loss(
+                        symbol=order.symbol,
+                        side=exit_side,
+                        trigger_price=order.stop_loss_price,
+                        quantity=qty,
+                        close_position=False,
+                        client_algo_id=client_algo_id_sl,
+                    )
+                    order.algo_stop_id = res_sl.get("algoId")
+                    logger.info(
+                        "order_manager.stop_loss_attached: %s (algoId=%s)",
+                        order.client_order_id,
+                        order.algo_stop_id,
+                    )
+                except Exception as exc:
+                    logger.critical(
+                        "order_manager.stop_loss_attach_failed: %s (%s)",
+                        order.client_order_id,
+                        exc,
+                    )
+                    sl_ok = False
+
+            # 2. Adjuntar Take-Profit (TAKE_PROFIT_MARKET)
+            if sl_ok and order.take_profit_price is not None:
+                client_algo_id_tp = f"TP_{order.client_order_id}"
+                try:
+                    res_tp = await self.algo_client.create_take_profit(
+                        symbol=order.symbol,
+                        side=exit_side,
+                        trigger_price=order.take_profit_price,
+                        quantity=qty,
+                        close_position=False,
+                        client_algo_id=client_algo_id_tp,
+                    )
+                    order.algo_tp_id = res_tp.get("algoId")
+                    logger.info(
+                        "order_manager.take_profit_attached: %s (algoId=%s)",
+                        order.client_order_id,
+                        order.algo_tp_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "order_manager.take_profit_attach_warning: %s (%s)",
+                        order.client_order_id,
+                        exc,
+                    )
+                    tp_ok = False
+
+            return sl_ok
 
         try:
-            # Ejecución con timeout estricto de 1500 ms
+            # Ejecución con timeout estricto de 1500 ms para protección
             success = await asyncio.wait_for(
-                _try_send_stop(),
+                _try_send_bracket(),
                 timeout=self.stop_attach_timeout_ms / 1000.0,
             )
             if success:
@@ -299,7 +339,28 @@ class OrderManager:
         )
 
         # 2. Cierre forzoso de emergencia con orden a mercado reduceOnly
-        await self._emergency_market_close(order.symbol, exit_side, order.filled_quantity)
+        await self._emergency_market_close(order.symbol, exit_side, qty)
+
+    async def cancel_algo_orders_for_symbol(self, symbol: str) -> None:
+        """Cancela las Algo Orders (SL y TP) asociadas a un símbolo tras el cierre de posición."""
+        clean_target = symbol.replace("-PERP", "").replace("-", "").upper()
+        for order in self._orders.values():
+            clean_ord = order.symbol.replace("-PERP", "").replace("-", "").upper()
+            if clean_ord == clean_target:
+                if order.algo_stop_id:
+                    try:
+                        await self.algo_client.cancel_algo_order(order.symbol, algo_id=order.algo_stop_id)
+                        logger.info("order_manager.oco_cancelled_sl: %s", order.algo_stop_id)
+                    except Exception as exc:
+                        logger.debug("order_manager.cancel_sl_silent: %s", exc)
+                    order.algo_stop_id = None
+                if order.algo_tp_id:
+                    try:
+                        await self.algo_client.cancel_algo_order(order.symbol, algo_id=order.algo_tp_id)
+                        logger.info("order_manager.oco_cancelled_tp: %s", order.algo_tp_id)
+                    except Exception as exc:
+                        logger.debug("order_manager.cancel_tp_silent: %s", exc)
+                    order.algo_tp_id = None
 
     async def _emergency_market_close(self, symbol: str, side: str, quantity: float) -> None:
         """Cierra inmediatamente la posición a mercado ante fallo de protección."""

@@ -6,15 +6,38 @@ logger = get_logger("features.cvd")
 
 
 class CVDTracker:
-    """Acumulador continuo de Delta de Volumen Acumulado (CVD) en USD."""
+    """
+    Acumulador continuo de Delta de Volumen Acumulado (CVD) en USD.
+    Implementa reinicio automático en el cambio de sesión a las 00:00:00 UTC (86,400s).
+    """
 
     def __init__(self, symbol: str) -> None:
         self.symbol = symbol
         self._cvd_by_exchange: dict[str, float] = {}
         self._global_cvd: float = 0.0
+        self._last_day: int = -1
 
-    def on_trade(self, exchange: str, signed_notional_usd: float) -> None:
-        """Actualiza el CVD acumulado del exchange y el total global."""
+    def on_trade(
+        self,
+        exchange: str,
+        signed_notional_usd: float,
+        ts_recv_ns: int | None = None,
+    ) -> None:
+        """
+        Actualiza el CVD acumulado del exchange y el total global.
+        Si se pasa ts_recv_ns y ocurre el paso a un nuevo día UTC (00:00:00), reinicia la sesión.
+        """
+        if ts_recv_ns is not None and ts_recv_ns > 0:
+            current_day = int(ts_recv_ns // (86_400 * 1_000_000_000))
+            if self._last_day != -1 and current_day > self._last_day:
+                logger.info(
+                    "cvd.session_reset: nuevo día UTC (%d -> %d). Reiniciando CVD de sesión a $0.00",
+                    self._last_day,
+                    current_day,
+                )
+                self.reset()
+            self._last_day = current_day
+
         ex = exchange.lower()
         if ex not in self._cvd_by_exchange:
             self._cvd_by_exchange[ex] = 0.0
