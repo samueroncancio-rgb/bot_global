@@ -54,3 +54,19 @@ def test_obi_persistence_autocorrelation() -> None:
 
     rho = calc.compute_persistence()
     assert rho > 0.50  # Alta persistencia positiva
+
+
+def test_obi_level_depth_exponential_decay() -> None:
+    """Verifica que los niveles más profundos tengan un decaimiento exponencial conforme a la literatura."""
+    calc = OBICalculator(levels=[5, 10, 20], decay_lambda=0.1)
+
+    # Libro donde nivel 1 tiene 10 BTC en Bid y nivel 10 tiene 10 BTC en Ask
+    bids = [OrderBookLevel(50000.0 - i * 10, 0.0) for i in range(10)]
+    asks = [OrderBookLevel(50010.0 + i * 10, 0.0) for i in range(10)]
+    bids[0] = OrderBookLevel(50000.0, 10.0)  # Nivel 0 (cerca de mid)
+    asks[9] = OrderBookLevel(50100.0, 10.0)  # Nivel 9 (profundo)
+
+    obi = calc.compute_weighted_obi(bids, asks, k_levels=10)
+    # Como nivel 0 tiene peso ~1.0 y nivel 9 tiene peso ~exp(-0.9) = 0.40,
+    # el OBI debe ser marcadamente positivo a favor del bid cercano
+    assert obi > 0.40

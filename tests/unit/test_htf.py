@@ -44,3 +44,32 @@ def test_htf_tracker_continuous_decay() -> None:
     # alpha = 1 - exp(-1) ~= 0.6321
     # expected = 0.6321 * 2000 + 0.3679 * 1800 ~= 1926.4
     assert 1920.0 < ema2 < 1930.0
+
+
+def test_htf_regime_with_dynamic_cvd_slope() -> None:
+    tracker = HTFTrendTracker(tau_sec=900.0)
+    klines = [
+        [1000, "1700.0", "1710.0", "1695.0", "1705.0", "100.0"],
+        [2000, "1705.0", "1720.0", "1700.0", "1715.0", "150.0"],
+    ]
+    tracker.seed_from_klines(klines)
+
+    # Caso 1: CVD acumulado es marcadamente negativo (-5,000,000 por una caída anterior),
+    # pero el precio está sobre la EMA (1750 > EMA) y el flujo de los últimos 15m es comprador (+50,000).
+    # Con el filtro dinámico debe ser BULLISH (no neutral ni bearish atrapado).
+    regime = tracker.compute_regime(
+        mid_price=1750.0,
+        global_cvd=-5_000_000.0,
+        cvd_delta_15m=50_000.0,
+    )
+    assert regime == "BULLISH"
+
+    # Caso 2: CVD acumulado es positivo (+3,000,000 por una subida anterior),
+    # pero el precio perforó la EMA hacia abajo (1680 < EMA) y el flujo reciente es vendedor (-20,000).
+    # Con el filtro dinámico debe ser BEARISH.
+    regime_bear = tracker.compute_regime(
+        mid_price=1680.0,
+        global_cvd=3_000_000.0,
+        cvd_delta_15m=-20_000.0,
+    )
+    assert regime_bear == "BEARISH"

@@ -68,7 +68,7 @@ class RollingZScore:
 
 
 class ExchangeDeltaTracker:
-    """Gestor integral del delta y z-score por exchange."""
+    """Gestor integral del delta y z-score por exchange con muestreo time-clock."""
 
     def __init__(
         self,
@@ -76,6 +76,7 @@ class ExchangeDeltaTracker:
         symbol: str,
         windows_sec: list[float] | None = None,
         min_samples: int = 15,
+        sample_interval_sec: float = 1.0,
     ) -> None:
         self.exchange = exchange
         self.symbol = symbol
@@ -86,13 +87,23 @@ class ExchangeDeltaTracker:
         self._z_scorers: dict[float, RollingZScore] = {
             w: RollingZScore(max_samples=300, min_samples=min_samples) for w in windows
         }
+        self.sample_interval_ns = int(sample_interval_sec * 1_000_000_000)
+        self._last_sample_ts_ns: dict[float, int] = {w: 0 for w in windows}
 
     def on_trade(self, ts_recv_ns: int, signed_notional_usd: float) -> None:
-        """Procesa una operación en todas las ventanas temporales activas."""
+        """Procesa una operación en todas las ventanas temporales activas.
+
+        El delta acumulado de alta frecuencia se actualiza con cada trade.
+        La distribución z-score se alimenta a intervalos discretos de tiempo
+        (time-clock >= 1s) para evitar el colapso de varianza durante ráfagas de trades.
+        """
         for window, tracker in self._trackers.items():
             tracker.add_trade(ts_recv_ns, signed_notional_usd)
-            delta = tracker.get_delta(ts_recv_ns)
-            self._z_scorers[window].add_sample(delta)
+            last_sample = self._last_sample_ts_ns.get(window, 0)
+            if last_sample == 0 or (ts_recv_ns - last_sample) >= self.sample_interval_ns:
+                delta = tracker.get_delta(ts_recv_ns)
+                self._z_scorers[window].add_sample(delta)
+                self._last_sample_ts_ns[window] = ts_recv_ns
 
     def get_delta(self, window_sec: float, current_ts_ns: int) -> float:
         """Obtiene el delta en USD para una ventana específica."""

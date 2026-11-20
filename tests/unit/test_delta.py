@@ -60,3 +60,24 @@ def test_exchange_delta_tracker_multi_window() -> None:
     assert tracker.get_delta(1.0, 2_000_000_000) == 1000.0
     # Ventana 5.0s contiene los 3 trades (5000 - 2000 + 1000 = 4000)
     assert tracker.get_delta(5.0, 2_000_000_000) == 4000.0
+
+
+def test_exchange_delta_tracker_time_clock_sampling() -> None:
+    """Verifica que el muestreo Time-Clock no colapse el buffer por ráfagas de trades."""
+    tracker = ExchangeDeltaTracker(
+        "binance", "BTC-USDT-PERP", windows_sec=[60.0], min_samples=3, sample_interval_sec=1.0
+    )
+
+    # Simular 50 trades que ocurren en una ráfaga de 500ms en t=1.0s
+    t_start = 1_000_000_000
+    for i in range(50):
+        t_trade = t_start + i * 10_000_000  # cada 10ms
+        tracker.on_trade(t_trade, 100.0)
+
+    # Solo debe haberse registrado 1 muestra en el buffer z-score a pesar de los 50 trades
+    scorer = tracker._z_scorers[60.0]
+    assert len(scorer._samples) == 1
+
+    # Avanzar más de 1.0 segundo (t=2.1s) y enviar otro trade
+    tracker.on_trade(2_100_000_000, 200.0)
+    assert len(scorer._samples) == 2

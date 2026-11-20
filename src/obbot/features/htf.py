@@ -60,19 +60,30 @@ class HTFTrendTracker:
     def get_ema(self) -> float:
         return self._ema or 0.0
 
-    def compute_regime(self, mid_price: float, global_cvd: float) -> str:
+    def compute_regime(
+        self,
+        mid_price: float,
+        global_cvd: float,
+        cvd_delta_15m: float | None = None,
+    ) -> str:
         """
         Determina el régimen estructural:
-        - BULLISH: mid_price >= ema_15m Y global_cvd >= 0
-        - BEARISH: mid_price < ema_15m Y global_cvd <= 0
+        - BULLISH: mid_price >= ema_15m Y cvd_dinámico >= 0
+        - BEARISH: mid_price < ema_15m Y cvd_dinámico <= 0
         - NEUTRAL: divergencia o consolidación
+
+        Si se provee cvd_delta_15m (pendiente/variación reciente en 15m), se prioriza
+        sobre el CVD absoluto acumulado para evitar sesgos por eventos pasados de la sesión.
         """
         if not self._initialized or self._ema is None or self._ema <= 0.0 or mid_price <= 0.0:
             # Si aún no ha calibrado, permitir operar neutral
             return "NEUTRAL"
 
         is_above_ema = mid_price >= self._ema
-        is_cvd_positive = global_cvd >= 0.0
+        # Priorizar la pendiente en 15m sobre el CVD acumulado absoluto
+        is_cvd_positive = (
+            (cvd_delta_15m >= 0.0) if cvd_delta_15m is not None else (global_cvd >= 0.0)
+        )
 
         if is_above_ema and is_cvd_positive:
             return "BULLISH"

@@ -64,6 +64,9 @@ class BaselineOrderFlowStrategy(Strategy):
         require_persistence_warmup: bool = False,
         cooldown_sec: float = 3.0,
         post_close_cooldown_sec: float = 120.0,
+        enable_time_stop: bool = False,
+        time_stop_sec: float = 1800.0,
+        time_stop_z_threshold: float = 0.50,
     ) -> None:
         super().__init__(name="BaselineOrderFlow", symbol=symbol)
         self.z_threshold = z_threshold
@@ -73,9 +76,13 @@ class BaselineOrderFlowStrategy(Strategy):
         self.enable_htf_filter = enable_htf_filter
         self.enable_session_filter = enable_session_filter
         self.asian_session_z_threshold = asian_session_z_threshold
+        self.enable_time_stop = enable_time_stop
+        self.time_stop_sec = time_stop_sec
+        self.time_stop_z_threshold = time_stop_z_threshold
         self._last_order_ts_ns: int = 0
         self._last_position_closed_ts_ns: int = 0
         self._prev_position_size: float = 0.0
+        self._position_entry_ts_ns: int = 0
 
         # Dimensionamiento adaptativo según símbolo (optimizado para cuenta pequeña de $100 USD)
         if trade_size is not None:
@@ -228,6 +235,13 @@ class BaselineOrderFlowStrategy(Strategy):
         current_pos = portfolio.get_position(self.symbol) if portfolio else None
         current_size = current_pos.size if current_pos else 0.0
 
+        # Rastrear tiempo de apertura de posición para Time-Stop
+        if abs(current_size) > 1e-6:
+            if self._position_entry_ts_ns == 0:
+                self._position_entry_ts_ns = features.timestamp_ns
+        else:
+            self._position_entry_ts_ns = 0
+
         # Detección de transición de cierre de posición para activar cooldown post-trade
         if abs(self._prev_position_size) > 1e-6 and abs(current_size) <= 1e-6:
             self._last_position_closed_ts_ns = features.timestamp_ns
@@ -239,14 +253,13 @@ class BaselineOrderFlowStrategy(Strategy):
 
         # SINGLE-POSITION LOCK: Si ya existe una posición abierta, NO emitir nuevas entradas
         if abs(current_size) > 1e-6:
+            is_long = current_size > 0
+            z = features.global_delta_z
+            obi = features.obi_10_levels
+            exit_side: Literal["BUY", "SELL"] = "SELL" if is_long else "BUY"
+
             if self.enable_flow_invalidation:
-                is_long = current_size > 0
-                z = features.global_delta_z
-                obi = features.obi_10_levels
-
                 should_invalidate = False
-                exit_side: Literal["BUY", "SELL"] = "SELL" if is_long else "BUY"
-
                 if (
                     is_long
                     and (
@@ -280,6 +293,38 @@ class BaselineOrderFlowStrategy(Strategy):
                             time_in_force="GTC",
                         )
                     ]
+
+            # Time-Stop: salida por tiempo si la posición no progresa y el delta se neutralizó
+            if self.enable_time_stop and self._position_entry_ts_ns > 0:
+                elapsed_sec = (
+                    (features.timestamp_ns - self._position_entry_ts_ns) / 1_000_000_000.0
+                )
+                if elapsed_sec >= self.time_stop_sec:
+                    # Impulso agotado o en contra de la posición
+                    momentum_exhausted = (
+                        (is_long and z <= self.time_stop_z_threshold)
+                        or (not is_long and z >= -self.time_stop_z_threshold)
+                    )
+                    if momentum_exhausted:
+                        logger.warning(
+                            "strategy.time_stop_exit: cerrando posicion %s size=%.4f tras %.1fs en mercado con delta neutralizado (z=%.2f)",
+                            self.symbol,
+                            current_size,
+                            elapsed_sec,
+                            z,
+                        )
+                        return [
+                            OrderRequest(
+                                symbol=self.symbol,
+                                side=exit_side,
+                                order_type="MARKET",
+                                quantity=abs(current_size),
+                                price=0.0,
+                                reduce_only=True,
+                                time_in_force="GTC",
+                            )
+                        ]
+
             return []
 
         # Cooldown post-cierre de posición (evitar re-entradas inmediatas y sobre-operación / whipsaw)

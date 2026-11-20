@@ -206,6 +206,7 @@ class OrderFlowBotApp:
             stop_loss_pct=0.0050,
             take_profit_pct=0.0120,
             enable_htf_filter=True,
+            enable_time_stop=False,
             post_close_cooldown_sec=120.0,
         )
 

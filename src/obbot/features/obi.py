@@ -45,15 +45,15 @@ class OBICalculator:
             return 0.0
 
         w_bids = 0.0
-        for level in bids[:k_levels]:
+        for i, level in enumerate(bids[:k_levels]):
             dist_rel = max(0.0, (mid - level.price) / mid)
-            weight = math.exp(-self.decay_lambda * dist_rel)
+            weight = math.exp(-self.decay_lambda * (i + dist_rel * 10.0))
             w_bids += level.size * weight
 
         w_asks = 0.0
-        for level in asks[:k_levels]:
+        for i, level in enumerate(asks[:k_levels]):
             dist_rel = max(0.0, (level.price - mid) / mid)
-            weight = math.exp(-self.decay_lambda * dist_rel)
+            weight = math.exp(-self.decay_lambda * (i + dist_rel * 10.0))
             w_asks += level.size * weight
 
         total_weight = w_bids + w_asks

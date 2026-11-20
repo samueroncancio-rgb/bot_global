@@ -232,3 +232,29 @@ def test_risk_guard_rejects_excessive_stop_loss_distance() -> None:
     assert not decision.approved
     assert "Pérdida potencial por Stop-Loss" in decision.reason
     assert "excede el límite máximo permitido" in decision.reason
+
+
+def test_portfolio_state_unrealized_pnl_deduplication() -> None:
+    """Verifica que indexar simultáneamente por símbolo canónico y nativo no duplica PnL."""
+    portfolio = PortfolioState(
+        initial_daily_balance=5000.0,
+        current_wallet_balance=5000.0,
+    )
+    pos = PositionState(
+        symbol="ETH-USDT-PERP",
+        size=1.0,
+        entry_price=2000.0,
+        mark_price=1950.0,
+        unrealized_pnl=-50.0,
+        leverage=3,
+        margin_type="ISOLATED",
+    )
+    # Registrar la posición bajo ambas claves (canónica y nativa)
+    portfolio.positions["ETH-USDT-PERP"] = pos
+    portfolio.positions["ETHUSDT"] = pos
+
+    # El PnL total debe ser exactamente -50.0, NO -100.0
+    assert portfolio.total_unrealized_pnl == -50.0
+    assert portfolio.total_equity == 4950.0
+    # Drawdown = (5000 - 4950) / 5000 = 1%
+    assert portfolio.daily_drawdown_pct == 0.01

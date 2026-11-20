@@ -611,3 +611,63 @@ def test_baseline_strategy_dynamic_volatility_preserves_swing_ratio() -> None:
     ratio = tp_dist / sl_dist
     assert ratio >= 2.39, f"El ratio R/B debe ser al menos 2.40x, se obtuvo {ratio:.2f}"
 
+
+def test_strategy_time_stop_exit() -> None:
+    """Verifica que la estrategia cierre por Time-Stop si tras 30 min no avanza y el delta se neutraliza."""
+    strat = BaselineOrderFlowStrategy(
+        symbol="ETH-USDT-PERP",
+        enable_time_stop=True,
+        time_stop_sec=1800.0,  # 30 minutos
+        time_stop_z_threshold=0.50,
+        enable_flow_invalidation=False,
+    )
+    portfolio = PortfolioState(initial_daily_balance=5000.0, current_wallet_balance=5000.0)
+    pos = PositionState(
+        symbol="ETH-USDT-PERP",
+        size=0.02,  # Posición LONG abierta
+        entry_price=2000.0,
+        mark_price=2001.0,
+        unrealized_pnl=0.02,
+        leverage=3,
+        margin_type="ISOLATED",
+    )
+    portfolio.positions["ETH-USDT-PERP"] = pos
+
+    t_entry = 1000 * 1_000_000_000  # t = 1000s
+    feat_entry = _create_test_feature_vector(
+        symbol="ETH-USDT-PERP",
+        global_delta_z=1.0,
+        obi=0.10,
+        mid_price=2001.0,
+        timestamp_ns=t_entry,
+    )
+    # Primera evaluación registra t_entry
+    orders1 = strat.on_feature_vector(feat_entry, portfolio)
+    assert len(orders1) == 0  # No sale aún
+
+    # Evaluar a los 10 minutos (t = 1600s, elapsed = 600s < 1800s)
+    feat_mid = _create_test_feature_vector(
+        symbol="ETH-USDT-PERP",
+        global_delta_z=0.1,  # Delta neutralizado
+        obi=0.05,
+        mid_price=2001.0,
+        timestamp_ns=t_entry + 600 * 1_000_000_000,
+    )
+    assert len(strat.on_feature_vector(feat_mid, portfolio)) == 0
+
+    # Evaluar a los 31 minutos (t = 2860s, elapsed = 1860s >= 1800s) con delta neutralizado (z=0.1 <= 0.50)
+    feat_expired = _create_test_feature_vector(
+        symbol="ETH-USDT-PERP",
+        global_delta_z=0.1,
+        obi=0.02,
+        mid_price=2001.0,
+        timestamp_ns=t_entry + 1860 * 1_000_000_000,
+    )
+    orders_exit = strat.on_feature_vector(feat_expired, portfolio)
+    assert len(orders_exit) == 1
+    exit_order = orders_exit[0]
+    assert exit_order.side == "SELL"
+    assert exit_order.reduce_only is True
+    assert exit_order.order_type == "MARKET"
+    assert exit_order.quantity == 0.02
+

@@ -54,6 +54,7 @@ class FeatureVector:
     # Tendencia de marco temporal superior (HTF)
     htf_ema_15m: float = 0.0
     htf_trend_regime: str = "NEUTRAL"
+    cvd_delta_15m: float = 0.0
 
     @property
     def global_delta_z(self) -> float:
@@ -259,7 +260,12 @@ class FeatureEngine:
 
         # 6. Tendencia y régimen HTF
         htf_ema = self.htf_tracker.get_ema()
-        htf_regime = self.htf_tracker.compute_regime(mid_val, self.cvd_tracker.get_global_cvd())
+        cvd_delta_15m = self.cvd_tracker.get_cvd_delta(900.0, now_ns)
+        htf_regime = self.htf_tracker.compute_regime(
+            mid_val,
+            self.cvd_tracker.get_global_cvd(),
+            cvd_delta_15m=cvd_delta_15m,
+        )
 
         return FeatureVector(
             symbol=self.symbol,
@@ -281,4 +287,5 @@ class FeatureEngine:
             open_interest_usd=self._latest_oi_usd,
             htf_ema_15m=htf_ema,
             htf_trend_regime=htf_regime,
+            cvd_delta_15m=cvd_delta_15m,
         )

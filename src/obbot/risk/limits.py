@@ -81,10 +81,20 @@ class PortfolioState:
 
     @property
     def total_unrealized_pnl(self) -> float:
-        """Suma de PnL no realizado de todas las posiciones abiertas."""
+        """Suma de PnL no realizado de todas las posiciones abiertas.
+
+        Deduplica posiciones indexadas simultáneamente bajo clave canónica
+        (ej. 'ETH-USDT-PERP') y clave nativa (ej. 'ETHUSDT') para evitar
+        falsas alertas de drawdown y doble cómputo de pérdidas.
+        """
         if not self.positions:
             return 0.0
-        return sum(pos.unrealized_pnl for pos in self.positions.values())
+        unique_by_symbol: dict[str, PositionState] = {}
+        for key, pos in self.positions.items():
+            norm_key = key.replace("-PERP", "").replace("-", "").upper()
+            if norm_key not in unique_by_symbol or id(pos) == id(unique_by_symbol[norm_key]):
+                unique_by_symbol[norm_key] = pos
+        return sum(pos.unrealized_pnl for pos in unique_by_symbol.values())
 
     @property
     def total_equity(self) -> float:
